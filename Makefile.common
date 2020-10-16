@@ -4,6 +4,7 @@ INCFLAGS := \
 				-I/usr/include/ \
 				-I/usr/include/SDL2/ \
 				-I$(EMU) \
+				-I$(CP) \
 				-I$(CPU) \
 				-I$(FALCON) \
 				-I$(EMU)/includes \
@@ -13,8 +14,8 @@ INCFLAGS := \
 				-I$(LIBRETRO_COMM_DIR)/include \
 				-I$(LIBRETRO_COMM_DIR)/include/compat/zlib \
 				-I$(LIBRETRO_DIR)/include \
-				-I$(LIBUTILS)
-#				-I$(CPU_PREGEN)
+				-I$(LIBUTILS) \
+				-I$(CPU_PREGEN) 
 
 SOURCES_C   :=
 SOURCES_CXX :=
@@ -38,12 +39,10 @@ SOURCES_C += \
 				 $(ZLIB_DIR)/zutil.c 
 endif
 
-#SOURCES_C += $(CPU_PREGEN)/cpudefs.c \
-#				 $(CPU_PREGEN)/cpuemu.c \
-#				 $(CPU_PREGEN)/cpustbl.c \
-
 SOURCES_C += \
-#				 $(CPU)/build68k.c \
+				 $(CPU_PREGEN)/cpudefs.c \
+				 $(CPU_PREGEN)/cpuemu.c \
+				 $(CPU_PREGEN)/cpustbl.c \
 				 $(CPU)/fpp.c \
 				 $(CPU)/gencpu.c \
 				 $(CPU)/hatari-glue.c \

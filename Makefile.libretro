@@ -209,12 +209,13 @@ CXXFLAGS := $(CFLAGS)
 CPPFLAGS := $(CFLAGS)
 
 EMU = $(CORE_DIR)/src
+CP = $(EMU)/cpu
 CPU = $(EMU)/uae-cpu
 FALCON = $(EMU)/falcon
 DBG = $(EMU)/debug
 FLP = $(EMU)
 GUI = $(LIBRETRO_DIR)/gui-retro
-#CPU_PREGEN = $(LIBRETRO_DIR)/uae-cpu-pregen
+CPU_PREGEN = $(LIBRETRO_DIR)/uae-cpu-pregen
 LIBUTILS = $(LIBRETRO_DIR)/utils
 
 $(info    $(EMU) is $(EMU))

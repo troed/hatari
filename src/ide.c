@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <inttypes.h>
 
 #include "main.h"
 #include "configuration.h"
@@ -22,6 +23,7 @@
 #include "m68000.h"
 #include "mfp.h"
 #include "stMemory.h"
+#include "str.h"
 #include "sysdeps.h"
 
 #if HAVE_MALLOC_H
@@ -43,6 +45,20 @@ static uint32_t ide_data_readw(void *opaque, uint32_t addr);
 static void ide_data_writel(void *opaque, uint32_t addr, uint32_t val);
 static uint32_t ide_data_readl(void *opaque, uint32_t addr);
 
+/**
+ * Check whether IDE is available: The Falcon always has an IDE controller,
+ * and for the other machines it is normally only available on expansion
+ * cards - we assume that the users want us to emulate an IDE controller
+ * on such an expansion card if one of the IDE drives has been enabled.
+ * Note that we also disable IDE on Falcon if bFastBoot is enabled - TOS
+ * boots much faster if it does not have to scan for IDE devices.
+ */
+bool Ide_IsAvailable(void)
+{
+	return ConfigureParams.Ide[0].bUseDevice ||
+	       ConfigureParams.Ide[1].bUseDevice ||
+	       (Config_IsMachineFalcon() && !ConfigureParams.System.bFastBoot);
+}
 
 /**
  * Convert Falcon IDE registers to "normal" IDE register numbers.
@@ -79,17 +95,18 @@ static uint32_t fcha2io(uint32_t address)
 /**
  * Handle byte read access from IDE IO memory.
  */
-uae_u32 Ide_Mem_bget(uaecptr addr)
+uae_u32 REGPARAM3 Ide_Mem_bget(uaecptr addr)
 {
 	int ideport;
 	uint8_t retval;
+	uaecptr addr_in = addr;
 
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	if (addr >= 0xf00040 || !ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage)
+	if (addr >= 0xf00040 || !Ide_IsAvailable())
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(addr_in, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 
@@ -116,20 +133,21 @@ uae_u32 Ide_Mem_bget(uaecptr addr)
 /**
  * Handle word read access from IDE IO memory.
  */
-uae_u32 Ide_Mem_wget(uaecptr addr)
+uae_u32 REGPARAM3 Ide_Mem_wget(uaecptr addr)
 {
 	uint16_t retval;
+	uaecptr addr_in = addr;
 
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	if (addr >= 0xf00040 || !ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage)
+	if (addr >= 0xf00040 || !Ide_IsAvailable())
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(addr_in, BUS_ERROR_READ, BUS_ERROR_SIZE_WORD, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 
-	if (addr == 0xf00000)
+	if (addr == 0xf00000 || addr == 0xf00002)
 	{
 		retval = ide_data_readw(opaque_ide_if, 0);
 	}
@@ -146,16 +164,17 @@ uae_u32 Ide_Mem_wget(uaecptr addr)
 /**
  * Handle long-word read access from IDE IO memory.
  */
-uae_u32 Ide_Mem_lget(uaecptr addr)
+uae_u32 REGPARAM3 Ide_Mem_lget(uaecptr addr)
 {
 	uint32_t retval;
+	uaecptr addr_in = addr;
 
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	if (addr >= 0xf00040 || !ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage)
+	if (addr >= 0xf00040 || !Ide_IsAvailable())
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(addr_in, BUS_ERROR_READ, BUS_ERROR_SIZE_LONG, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 
@@ -179,19 +198,20 @@ uae_u32 Ide_Mem_lget(uaecptr addr)
 /**
  * Handle byte write access to IDE IO memory.
  */
-void Ide_Mem_bput(uaecptr addr, uae_u32 val)
+void REGPARAM3 Ide_Mem_bput(uaecptr addr, uae_u32 val)
 {
 	int ideport;
+	uaecptr addr_in = addr;
 
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 	val &= 0x0ff;
 
 	LOG_TRACE(TRACE_IDE, "IDE: bput($%x, $%x)\n", addr, val);
 
-	if (addr >= 0xf00040 || !ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage)
+	if (addr >= 0xf00040 || !Ide_IsAvailable())
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(addr_in, BUS_ERROR_WRITE, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, val);
 		return;
 	}
 
@@ -211,21 +231,23 @@ void Ide_Mem_bput(uaecptr addr, uae_u32 val)
 /**
  * Handle word write access to IDE IO memory.
  */
-void Ide_Mem_wput(uaecptr addr, uae_u32 val)
+void REGPARAM3 Ide_Mem_wput(uaecptr addr, uae_u32 val)
 {
+	uaecptr addr_in = addr;
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 	val &= 0x0ffff;
 
 	LOG_TRACE(TRACE_IDE, "IDE: wput($%x, $%x)\n", addr, val);
 
-	if (addr >= 0xf00040 || !ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage)
+	if (addr >= 0xf00040 || !Ide_IsAvailable())
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(addr_in, BUS_ERROR_WRITE, BUS_ERROR_SIZE_WORD, BUS_ERROR_ACCESS_DATA, val);
 		return;
 	}
 
-	if (addr == 0xf00000)
+	if (addr == 0xf00000 || addr == 0xf00002)
 	{
 		ide_data_writew(opaque_ide_if, 0, val);
 	}
@@ -235,16 +257,18 @@ void Ide_Mem_wput(uaecptr addr, uae_u32 val)
 /**
  * Handle long-word write access to IDE IO memory.
  */
-void Ide_Mem_lput(uaecptr addr, uae_u32 val)
+void REGPARAM3 Ide_Mem_lput(uaecptr addr, uae_u32 val)
 {
+	uaecptr addr_in = addr;
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
 	LOG_TRACE(TRACE_IDE, "IDE: lput($%x, $%x)\n", addr, val);
 
-	if (addr >= 0xf00040 || !ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage)
+	if (addr >= 0xf00040 || !Ide_IsAvailable())
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(addr_in, BUS_ERROR_WRITE, BUS_ERROR_SIZE_LONG, BUS_ERROR_ACCESS_DATA, val);
 		return;
 	}
 
@@ -298,7 +322,7 @@ void Ide_Mem_lput(uaecptr addr, uae_u32 val)
 #define BIOS_ATA_TRANSLATION_LARGE  3
 #define BIOS_ATA_TRANSLATION_RECHS  4
 
-#ifndef ENOMEDIUM           // It's not defined on Mac OS X for example
+#ifndef ENOMEDIUM           // It's not defined on macOS for example
 #define ENOMEDIUM ENODEV
 #endif
 
@@ -318,11 +342,10 @@ struct BlockDriverState {
 
     FILE *fhndl;
     void *opaque;
-
-    char filename[1024];
-    char backing_file[1024]; /* if non zero, the image is a diff of
-                                this file image */
+    off_t file_size;
     int media_changed;
+    int byteswap;
+    int sector_size;
 
     /* I/O stats (display with "info blockstats"). */
     uint64_t rd_bytes;
@@ -346,46 +369,6 @@ static inline void cpu_to_be16wu(uint16_t *p, uint16_t v)
 }
 
 
-#if defined(WIN32)
-
-/* Remove possible conflicting TCHAR declaration from cpu/compat.h */
-#undef TCHAR
-
-#include <windows.h>
-
-static void *qemu_memalign(size_t alignment, size_t size)
-{
-    return VirtualAlloc(NULL, size, MEM_COMMIT, PAGE_READWRITE);
-}
-
-static void qemu_free(void *ptr)
-{
-    VirtualFree(ptr, 0, MEM_RELEASE);
-}
-
-#else
-
-static void *qemu_memalign(size_t alignment, size_t size)
-{
-#if HAVE_POSIX_MEMALIGN
-	int ret;
-	void *ptr;
-	ret = posix_memalign(&ptr, alignment, size);
-	if (ret != 0)
-		return NULL;
-	return ptr;
-#elif HAVE_MEMALIGN
-	return memalign(alignment, size);
-#else
-	return valloc(size);
-#endif
-}
-
-#define qemu_free free
-
-#endif
-
-
 #define le32_to_cpu SDL_SwapLE32
 #define le16_to_cpu SDL_SwapLE16
 #define cpu_to_le32 SDL_SwapLE32
@@ -394,22 +377,18 @@ static void *qemu_memalign(size_t alignment, size_t size)
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
-#define SECTOR_BITS 9
-#define SECTOR_SIZE (1 << SECTOR_BITS)
-
 
 /**
  * return 0 as number of sectors if no device present or error
  */
 static void bdrv_get_geometry(BlockDriverState *bs, uint64_t *nb_sectors_ptr)
 {
-	int64_t length;
-	length = File_Length(bs->filename);
+	off_t length = bs->file_size;
 
 	if (length < 0)
 		length = 0;
 	else
-		length = length >> SECTOR_BITS;
+		length = length / bs->sector_size;
 	*nb_sectors_ptr = length;
 }
 
@@ -476,7 +455,6 @@ static void bdrv_set_locked(BlockDriverState *bs, int locked)
 	bs->locked = locked;
 }
 
-
 /* return < 0 if error. See bdrv_write() for the return codes */
 static int bdrv_read(BlockDriverState *bs, int64_t sector_num,
                      uint8_t *buf, int nb_sectors)
@@ -486,21 +464,35 @@ static int bdrv_read(BlockDriverState *bs, int64_t sector_num,
 	if (!bs->fhndl)
 		return -ENOMEDIUM;
 
-	len = nb_sectors * 512;
+	len = nb_sectors * bs->sector_size;
 
-	fseeko(bs->fhndl, sector_num*512, SEEK_SET);
+	if (fseeko(bs->fhndl, sector_num * bs->sector_size, SEEK_SET) != 0)
+	{
+		perror("bdrv_read");
+		return -errno;
+	}
 	ret = fread(buf, 1, len, bs->fhndl);
 	if (ret != len)
 	{
-		fprintf(stderr,"IDE: bdrv_read error (%d != %d length) at sector %lu!\n", ret, len, (unsigned long)sector_num);
+		Log_Printf(LOG_ERROR, "IDE: bdrv_read error (%d != %d length) at sector %lu!\n",
+		           ret, len, (unsigned long)sector_num);
 		return -EINVAL;
 	}
-	else
+
+	bs->rd_bytes += (unsigned) len;
+	bs->rd_ops ++;
+
+	if (bs->byteswap)
 	{
-		bs->rd_bytes += (unsigned) len;
-		bs->rd_ops ++;
-		return 0;
+		uint16_t *buf16 = (uint16_t *)buf;
+		while (len > 0) {
+			*buf16 = SDL_Swap16(*buf16);
+			buf16++;
+			len -= 2;
+		}
 	}
+
+	return 0;
 }
 
 
@@ -513,41 +505,69 @@ static int bdrv_read(BlockDriverState *bs, int64_t sector_num,
 static int bdrv_write(BlockDriverState *bs, int64_t sector_num,
                       const uint8_t *buf, int nb_sectors)
 {
-	int ret, len;
+	int ret, len, idx;
+	uint16_t *buf16;
 
 	if (!bs->fhndl)
 		return -ENOMEDIUM;
 	if (bs->read_only)
 		return -EACCES;
 
-	len = nb_sectors * 512;
+	len = nb_sectors * bs->sector_size;
 
-	fseeko(bs->fhndl, sector_num*512, SEEK_SET);
-	ret = fwrite(buf, 1, len, bs->fhndl);
-	if (ret != len)
+	if (fseeko(bs->fhndl, sector_num * bs->sector_size, SEEK_SET) != 0)
 	{
-		fprintf(stderr,"IDE: bdrv_write error (%d != %d length) at sector %lu!\n", ret, len,  (unsigned long)sector_num);
-		return -EIO;
+		perror("bdrv_write");
+		return -errno;
+	}
+
+	if (!bs->byteswap)
+	{
+		ret = fwrite(buf, 1, len, bs->fhndl);
 	}
 	else
 	{
-		bs->wr_bytes += (unsigned) len;
-		bs->wr_ops ++;
-		return 0;
+		buf16 = malloc(len);
+		if (!buf16)
+			return -ENOMEM;
+		for (idx = 0; idx < len; idx += 2)
+		{
+			buf16[idx / 2] = SDL_Swap16(*(const uint16_t *)&buf[idx]);
+		}
+		ret = fwrite(buf16, 1, len, bs->fhndl);
+		free(buf16);
 	}
+	if (ret != len)
+	{
+		Log_Printf(LOG_ERROR, "IDE: bdrv_write error (%d != %d length) at sector %lu!\n",
+		           ret, len,  (unsigned long)sector_num);
+		return -EIO;
+	}
+
+	bs->wr_bytes += (unsigned) len;
+	bs->wr_ops ++;
+
+	return 0;
 }
 
 
-static int bdrv_open(BlockDriverState *bs, const char *filename, int flags)
+static int bdrv_open(BlockDriverState *bs, const char *filename, unsigned long blockSize, int flags)
 {
 	Log_Printf(LOG_INFO, "Mounting IDE hard drive image %s\n", filename);
 
-	strncpy(bs->filename, filename, sizeof(bs->filename));
-
 	bs->read_only = 0;
+	bs->file_size = HDC_CheckAndGetSize(filename, blockSize);
+	if (bs->file_size <= 0)
+		return -1;
+	if (bs->file_size < 2 * 16 * 63 * bs->sector_size)
+	{
+		Log_AlertDlg(LOG_ERROR, "IDE disk image size (%"PRId64" bytes) is "
+		                        "too small for an IDE disk image "
+		                        "(min. 1032192 byte)", bs->file_size);
+		return -1;
+	}
 
 	bs->fhndl = fopen(filename, "rb+");
-
 	if (!bs->fhndl) {
 		/* Maybe the file is read-only? */
 		bs->fhndl = fopen(filename, "rb");
@@ -557,7 +577,7 @@ static int bdrv_open(BlockDriverState *bs, const char *filename, int flags)
 	}
 	else if (!File_Lock(bs->fhndl))
 	{
-		Log_Printf(LOG_ERROR, "ERROR: cannot lock HD file for writing!\n");
+		Log_Printf(LOG_ERROR, "Cannot lock HD file for writing!\n");
 		fclose(bs->fhndl);
 		bs->fhndl = NULL;
 	}
@@ -758,6 +778,9 @@ static void bdrv_eject(BlockDriverState *bs, int eject_flag)
 /* set to 1 set disable mult support */
 #define MAX_MULT_SECTORS 16
 
+/* maximum physical IDE hard disk drive sector size */
+#define MAX_SECTOR_SIZE 4096
+
 /* ATAPI defines */
 
 #define ATAPI_PACKET_SIZE 12
@@ -836,7 +859,7 @@ static void bdrv_eject(BlockDriverState *bs, int eject_flag)
 #define GPMODE_TO_PROTECT_PAGE		0x1d
 #define GPMODE_CAPABILITIES_PAGE	0x2a
 #define GPMODE_ALL_PAGES		0x3f
-/* Not in Mt. Fuji, but in ATAPI 2.6 -- depricated now in favor
+/* Not in Mt. Fuji, but in ATAPI 2.6 -- deprecated now in favor
  * of MODE_SENSE_POWER_PAGE */
 #define GPMODE_CDROM_PAGE		0x0d
 
@@ -948,7 +971,7 @@ static void ide_identify(IDEState *s)
 {
 	uint16_t *p;
 	unsigned int oldsize;
-	char buf[20];
+	char buf[40];
 
 	if (s->identify_set)
 	{
@@ -970,14 +993,11 @@ static void ide_identify(IDEState *s)
 	put_le16(p + 21, 512); /* cache size in sectors */
 	put_le16(p + 22, 4); /* ecc bytes */
 	padstr((char *)(p + 23), FW_VERSION, 8); /* firmware version */
-	if(s == opaque_ide_if) /* model */
-	{
-		padstr((char *)(p + 27), "Hatari IDE master disk", 40);
-	}
-	else
-	{
-		padstr((char *)(p + 27), "Hatari IDE slave disk", 40);
-	}
+	/* Use the same convention for the name as SCSI disks are using: The
+	 * first 8 characters should be the vendor, i.e. use 2 spaces here */
+	snprintf(buf, sizeof(buf), "Hatari  IDE disk %liM",
+	         (long)(s->nb_sectors / (1024 * 1024 / s->bs->sector_size)));
+	padstr((char *)(p + 27), buf, 40);
 #if MAX_MULT_SECTORS > 1
 	put_le16(p + 47, 0x8000 | MAX_MULT_SECTORS);
 #endif
@@ -1013,10 +1033,16 @@ static void ide_identify(IDEState *s)
 	put_le16(p + 87, (1 << 14));
 	put_le16(p + 88, 0x3f | (1 << 13)); /* udma5 set and supported */
 	put_le16(p + 93, 1 | (1 << 14) | 0x2000);
+	/* LBA-48 sector count */
 	put_le16(p + 100, s->nb_sectors);
 	put_le16(p + 101, s->nb_sectors >> 16);
 	put_le16(p + 102, s->nb_sectors >> 32);
 	put_le16(p + 103, s->nb_sectors >> 48);
+	/* ratio logical/physical: 0, logicalSectorSizeSupported */
+	put_le16(p + 106, 1 << 12);
+	/* words per logical sector */
+	put_le16(p + 117, s->bs->sector_size >> 1);
+	put_le16(p + 118, s->bs->sector_size >> 17);
 
 	memcpy(s->identify_data, p, sizeof(s->identify_data));
 	s->identify_set = 1;
@@ -1106,9 +1132,8 @@ static inline void ide_set_irq(IDEState *s)
 {
 	if (!(s->cmd & IDE_CMD_DISABLE_IRQ))
 	{
-		/* raise IRQ */
-		MFP_InputOnChannel ( MFP_INT_FDCHDC , 0 );
-		MFP_GPIP &= ~0x20;
+		/* Set IRQ (set line to low) */
+		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_LOW );
 	}
 }
 
@@ -1219,7 +1244,7 @@ static void ide_sector_read(IDEState *s)
 			ide_set_irq(s);
 			return;
 		}
-		ide_transfer_start(s, s->io_buffer, 512 * n, ide_sector_read);
+		ide_transfer_start(s, s->io_buffer, s->bs->sector_size * n, ide_sector_read);
 		ide_set_irq(s);
 		ide_set_sector(s, sector_num + n);
 		s->nsector -= n;
@@ -1257,7 +1282,7 @@ static void ide_sector_write(IDEState *s)
 		n1 = s->nsector;
 		if (n1 > s->req_nb_sectors)
 			n1 = s->req_nb_sectors;
-		ide_transfer_start(s, s->io_buffer, 512 * n1, ide_sector_write);
+		ide_transfer_start(s, s->io_buffer, s->bs->sector_size * n1, ide_sector_write);
 	}
 	ide_set_sector(s, sector_num + n);
 
@@ -1680,7 +1705,6 @@ static void ide_atapi_cmd(IDEState *s)
 		uint64_t total_sectors;
 
 		bdrv_get_geometry(s->bs, &total_sectors);
-		total_sectors >>= 2;
 		if (total_sectors == 0)
 		{
 			ide_atapi_cmd_error(s, SENSE_NOT_READY,
@@ -1736,7 +1760,6 @@ static void ide_atapi_cmd(IDEState *s)
 		uint64_t total_sectors;
 
 		bdrv_get_geometry(s->bs, &total_sectors);
-		total_sectors >>= 2;
 		if (total_sectors == 0)
 		{
 			ide_atapi_cmd_error(s, SENSE_NOT_READY,
@@ -1750,7 +1773,7 @@ static void ide_atapi_cmd(IDEState *s)
 		switch (format)
 		{
 		case 0:
-			fprintf(stderr,"IDE FIXME: cdrom_read_toc");
+			Log_Printf(LOG_ERROR, "IDE FIXME: cdrom_read_toc not implemented");
 			len=-1;
 			//len = cdrom_read_toc(total_sectors, buf, msf, start_track);
 			if (len < 0)
@@ -1766,7 +1789,7 @@ static void ide_atapi_cmd(IDEState *s)
 			ide_atapi_cmd_reply(s, 12, max_len);
 			break;
 		case 2:
-			fprintf(stderr,"IDE FIXME: cdrom_read_toc_raw");
+			Log_Printf(LOG_ERROR, "IDE FIXME: cdrom_read_toc_raw not implemented");
 			len=-1;
 			//len = cdrom_read_toc_raw(total_sectors, buf, msf, start_track);
 			if (len < 0)
@@ -1786,7 +1809,6 @@ error_cmd:
 		uint64_t total_sectors;
 
 		bdrv_get_geometry(s->bs, &total_sectors);
-		total_sectors >>= 2;
 		if (total_sectors == 0)
 		{
 			ide_atapi_cmd_error(s, SENSE_NOT_READY,
@@ -1816,7 +1838,6 @@ error_cmd:
 		{
 		case 0:
 			bdrv_get_geometry(s->bs, &total_sectors);
-			total_sectors >>= 2;
 			if (total_sectors == 0)
 			{
 				ide_atapi_cmd_error(s, SENSE_NOT_READY,
@@ -1860,8 +1881,8 @@ error_cmd:
 		buf[5] = 0; /* reserved */
 		buf[6] = 0; /* reserved */
 		buf[7] = 0; /* reserved */
-		padstr8(buf + 8, 8, "QEMU");
-		padstr8(buf + 16, 16, "QEMU CD-ROM");
+		padstr8(buf + 8, 8, "Hatari");
+		padstr8(buf + 16, 16, "CD/DVD-ROM");
 		padstr8(buf + 32, 4, FW_VERSION);
 		ide_atapi_cmd_reply(s, 36, max_len);
 		break;
@@ -2007,10 +2028,11 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 		LOG_TRACE(TRACE_IDE, "IDE: CMD=%02x\n", val);
 
 		s = ide_if->cur_drive;
-		/* ignore commands to non existent slave */
+		/* ignore commands to non existent IDE device 1 */
 		if (s != ide_if && !s->bs)
 		{
-			fprintf(stderr,"IDE: CMD to non-existant slave!\n");
+			Log_Printf(LOG_INFO, "IDE: Tried to send command to "
+			           "non-existent IDE device #1!\n");
 			break;
 		}
 
@@ -2055,6 +2077,7 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 			break;
 		case WIN_VERIFY_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_VERIFY:
 		case WIN_VERIFY_ONCE:
 			/* do sector number check ? */
@@ -2070,11 +2093,12 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 			n = s->nsector;
 			if (n > s->req_nb_sectors)
 				n = s->req_nb_sectors;
-			ide_transfer_start(s, s->io_buffer, 512 * n, ide_sector_write);
+			ide_transfer_start(s, s->io_buffer, s->bs->sector_size * n, ide_sector_write);
 			s->media_changed = 1;
 			break;
 		case WIN_READ_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_READ:
 		case WIN_READ_ONCE:
 			if (!s->bs)
@@ -2085,6 +2109,7 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 			break;
 		case WIN_WRITE_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_WRITE:
 		case WIN_WRITE_ONCE:
 		case CFA_WRITE_SECT_WO_ERASE:
@@ -2093,11 +2118,12 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 			s->error = 0;
 			s->status = SEEK_STAT | READY_STAT;
 			s->req_nb_sectors = 1;
-			ide_transfer_start(s, s->io_buffer, 512, ide_sector_write);
+			ide_transfer_start(s, s->io_buffer, s->bs->sector_size, ide_sector_write);
 			s->media_changed = 1;
 			break;
 		case WIN_MULTREAD_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_MULTREAD:
 			if (!s->mult_sectors)
 				goto abort_cmd;
@@ -2107,6 +2133,7 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 			break;
 		case WIN_MULTWRITE_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_MULTWRITE:
 		case CFA_WRITE_MULTI_WO_ERASE:
 			if (!s->mult_sectors)
@@ -2118,32 +2145,35 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 			n = s->nsector;
 			if (n > s->req_nb_sectors)
 				n = s->req_nb_sectors;
-			ide_transfer_start(s, s->io_buffer, 512 * n, ide_sector_write);
+			ide_transfer_start(s, s->io_buffer, s->bs->sector_size * n, ide_sector_write);
 			s->media_changed = 1;
 			break;
 		case WIN_READDMA_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_READDMA:
 		case WIN_READDMA_ONCE:
 			if (!s->bs)
 				goto abort_cmd;
 			ide_cmd_lba48_transform(s, lba48);
 			// ide_sector_read_dma(s);
-			fprintf(stderr, "IDE: DMA read not supported!\n");
+			Log_Printf(LOG_ERROR, "IDE: DMA read not supported!\n");
 			break;
 		case WIN_WRITEDMA_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_WRITEDMA:
 		case WIN_WRITEDMA_ONCE:
 			if (!s->bs)
 				goto abort_cmd;
 			ide_cmd_lba48_transform(s, lba48);
 			// ide_sector_write_dma(s);
-			fprintf(stderr, "IDE: DMA write not supported!\n");
+			Log_Printf(LOG_ERROR, "IDE: DMA write not supported!\n");
 			s->media_changed = 1;
 			break;
 		case WIN_READ_NATIVE_MAX_EXT:
 			lba48 = 1;
+			/* fall through */
 		case WIN_READ_NATIVE_MAX:
 			ide_cmd_lba48_transform(s, lba48);
 			ide_set_sector(s, s->nb_sectors - 1);
@@ -2181,7 +2211,7 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 				break;
 			case 0x03:   /* set transfer mode */
 			{
-				uint8_t val = s->nsector & 0x07;
+				uint8_t mval = s->nsector & 0x07;
 
 				switch (s->nsector >> 3)
 				{
@@ -2191,12 +2221,12 @@ static void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 					put_le16(s->identify_data + 88,0x3f);
 					break;
 				case 0x04: /* mdma mode */
-					put_le16(s->identify_data + 63,0x07 | (1 << (val + 8)));
+					put_le16(s->identify_data + 63,0x07 | (1 << (mval + 8)));
 					put_le16(s->identify_data + 88,0x3f);
 					break;
 				case 0x08: /* udma mode */
 					put_le16(s->identify_data + 63,0x07);
-					put_le16(s->identify_data + 88,0x3f | (1 << (val + 8)));
+					put_le16(s->identify_data + 88,0x3f | (1 << (mval + 8)));
 					break;
 				default:
 					goto abort_cmd;
@@ -2282,12 +2312,13 @@ static uint32_t ide_ioport_read(void *opaque, uint32_t addr1)
 	IDEState *ide_if = opaque;
 	IDEState *s = ide_if->cur_drive;
 	uint32_t addr;
-	int ret, hob;
+	int ret;
+
+	/* FIXME: HOB readback uses bit 7, but it's always set right now */
+	//int hob = s->select & (1 << 7);
+	const int hob = 0;
 
 	addr = addr1 & 7;
-	/* FIXME: HOB readback uses bit 7, but it's always set right now */
-	//hob = s->select & (1 << 7);
-	hob = 0;
 	switch (addr)
 	{
 	case 0:
@@ -2346,8 +2377,9 @@ static uint32_t ide_ioport_read(void *opaque, uint32_t addr1)
 			ret = 0;
 		else
 			ret = s->status;
-		/* Lower IRQ */
-		MFP_GPIP |= 0x20;
+
+		/* Clear IRQ (set line to high) */
+		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_HIGH );
 		break;
 	}
 	LOG_TRACE(TRACE_IDE, "IDE: read addr=0x%x val=%02x\n", addr1, ret);
@@ -2501,7 +2533,7 @@ struct partition
 	uint8_t end_cyl;		/* end cylinder */
 	uint32_t start_sect;	/* starting sector counting from 0 */
 	uint32_t nr_sects;		/* nr of sectors in partition */
-} __attribute__((packed));
+};
 
 /* try to guess the disk logical geometry from the MSDOS partition table. Return 0 if OK, -1 if could not guess */
 static int guess_disk_lchs(IDEState *s,
@@ -2512,19 +2544,19 @@ static int guess_disk_lchs(IDEState *s,
 	struct partition *p;
 	uint32_t nr_sects;
 
-	buf = qemu_memalign(512, 512);
+	buf = malloc(MAX_SECTOR_SIZE);
 	if (buf == NULL)
 		return -1;
 	ret = bdrv_read(s->bs, 0, buf, 1);
 	if (ret < 0)
 	{
-		qemu_free(buf);
+		free(buf);
 		return -1;
 	}
 	/* test msdos magic */
 	if (buf[510] != 0x55 || buf[511] != 0xaa)
 	{
-		qemu_free(buf);
+		free(buf);
 		return -1;
 	}
 	for (i = 0; i < 4; i++)
@@ -2545,13 +2577,11 @@ static int guess_disk_lchs(IDEState *s,
 			*pheads = heads;
 			*psectors = sectors;
 			*pcylinders = cylinders;
-			LOG_TRACE(TRACE_IDE, "IDE: guessed geometry LCHS=%d %d %d\n",
-			       cylinders, heads, sectors);
-			qemu_free(buf);
+			free(buf);
 			return 0;
 		}
 	}
-	qemu_free(buf);
+	free(buf);
 	return -1;
 }
 
@@ -2566,7 +2596,12 @@ static void ide_init2(IDEState *ide_state, BlockDriverState *hd0,
 	for (i = 0; i < 2; i++)
 	{
 		s = ide_state + i;
-		s->io_buffer = qemu_memalign(512, MAX_MULT_SECTORS*512 + 4);
+		s->cur_drive = s;
+
+		if (!ConfigureParams.Ide[i].bUseDevice)
+			continue;
+
+		s->io_buffer = malloc(MAX_MULT_SECTORS * MAX_SECTOR_SIZE + 4);
 		assert(s->io_buffer);
 		if (i == 0)
 			s->bs = hd0;
@@ -2639,6 +2674,8 @@ default_geometry:
 				}
 				bdrv_set_geometry_hint(s->bs, s->cylinders, s->heads, s->sectors);
 			}
+			LOG_TRACE(TRACE_IDE, "IDE: using geometry LCHS=%d %d %d for drive %d\n",
+			       s->cylinders, s->heads, s->sectors, i);
 			if (bdrv_get_type_hint(s->bs) == BDRV_TYPE_CDROM)
 			{
 				s->is_cdrom = 1;
@@ -2663,34 +2700,39 @@ static BlockDriverState *hd_table[2];
  */
 void Ide_Init(void)
 {
-	if (!ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage)
+	int i;
+
+	if (!Ide_IsAvailable() )
 		return;
 
-	opaque_ide_if = malloc(sizeof(IDEState) * 2);
-	hd_table[0] = malloc(sizeof(BlockDriverState));
-	hd_table[1] = malloc(sizeof(BlockDriverState));
+	opaque_ide_if = calloc(2, sizeof(IDEState));
+	assert(opaque_ide_if);
 
-	assert(opaque_ide_if && hd_table[0] && hd_table[1]);
-
-	memset(opaque_ide_if, 0, sizeof(IDEState) * 2);
-
-	memset(hd_table[0], 0, sizeof(BlockDriverState));
-	memset(hd_table[1], 0, sizeof(BlockDriverState));
-
-	bdrv_open(hd_table[0], ConfigureParams.HardDisk.szIdeMasterHardDiskImage, 0);
-	nIDEPartitions += HDC_PartitionCount(hd_table[0]->fhndl, TRACE_IDE);
-
-	if (ConfigureParams.HardDisk.bUseIdeSlaveHardDiskImage)
+	for (i = 0; i < 2; i++)
 	{
-		bdrv_open(hd_table[1], ConfigureParams.HardDisk.szIdeSlaveHardDiskImage, 0);
-		nIDEPartitions += HDC_PartitionCount(hd_table[1]->fhndl, TRACE_IDE);
+		hd_table[i] = malloc(sizeof(BlockDriverState));
+		assert(hd_table[i]);
+		memset(hd_table[i], 0, sizeof(BlockDriverState));
+		if (ConfigureParams.Ide[i].bUseDevice)
+		{
+			int is_byteswap;
+			bdrv_open(hd_table[i], ConfigureParams.Ide[i].sDeviceFile, ConfigureParams.Ide[i].nBlockSize, 0);
+			nIDEPartitions += HDC_PartitionCount(hd_table[i]->fhndl, TRACE_IDE, &is_byteswap);
+			/* Our IDE implementation is little endian by default,
+			 * so we need to byteswap if the image is not swapped! */
+			if (ConfigureParams.Ide[i].nByteSwap == BYTESWAP_AUTO)
+				hd_table[i]->byteswap = !is_byteswap;
+			else
+				hd_table[i]->byteswap = !ConfigureParams.Ide[i].nByteSwap;
+			LOG_TRACE(TRACE_IDE, "IDE: little->big endian byte-swapping %s for drive %d\n",
+				  hd_table[i]->byteswap ? "enabled" : "disabled", i);
+			hd_table[i]->sector_size = ConfigureParams.Ide[i].nBlockSize;
+			hd_table[i]->type = ConfigureParams.Ide[i].nDeviceType;
+		}
+	}
 
-		ide_init2(&opaque_ide_if[0], hd_table[0], hd_table[1]);
-	}
-	else
-	{
-		ide_init2(&opaque_ide_if[0], hd_table[0], NULL);
-	}
+	ide_init2(&opaque_ide_if[0], hd_table[0],
+	          ConfigureParams.Ide[1].bUseDevice ? hd_table[1] : NULL);
 }
 
 

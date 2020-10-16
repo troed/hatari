@@ -3,16 +3,28 @@ INSTALL(FILES authors.txt emutos.txt keymap-sample.txt memory-usage.txt
 	midi-linux.txt release-notes.txt todo.txt
 	DESTINATION ${DOCDIR})
 
-INSTALL(FILES compatibility.html  manual.html
+INSTALL(FILES compatibility.html manual.html debugger.html manual.css toc.js
 	DESTINATION ${DOCDIR})
 
 INSTALL(DIRECTORY images
 	DESTINATION ${DOCDIR})
 
-# if(UNIX)
+find_program(GZIP gzip)
+if(UNIX AND GZIP)
 	add_custom_target(manpages ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hatari.1.gz)
 	add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hatari.1.gz
-		COMMAND gzip -c -9 ${CMAKE_CURRENT_SOURCE_DIR}/hatari.1 > ${CMAKE_CURRENT_BINARY_DIR}/hatari.1.gz
+		COMMAND gzip -c -9 ${CMAKE_CURRENT_SOURCE_DIR}/hatari.1
+			> ${CMAKE_CURRENT_BINARY_DIR}/hatari.1.gz
 		DEPENDS hatari.1)
 	INSTALL(FILES  ${CMAKE_CURRENT_BINARY_DIR}/hatari.1.gz DESTINATION ${MANDIR})
-# endif(UNIX)
+endif()
+
+find_program(TIDY tidy)
+if(TIDY)
+	add_test(NAME tidy-manual
+	         COMMAND tidy -q -e ${CMAKE_CURRENT_SOURCE_DIR}/manual.html)
+	add_test(NAME tidy-compatibility
+	         COMMAND tidy -q -e ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.html)
+	add_test(NAME tidy-debugger
+	         COMMAND tidy -q -e ${CMAKE_CURRENT_SOURCE_DIR}/debugger.html)
+endif()

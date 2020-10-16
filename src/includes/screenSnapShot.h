@@ -8,12 +8,12 @@
 #ifndef HATARI_SCREENSNAPSHOT_H
 #define HATARI_SCREENSNAPSHOT_H
 
-#include <stdio.h>
-#include <SDL.h>
+#include <SDL_video.h>
 
-extern int ScreenSnapShot_SavePNG_ToFile(SDL_Surface *surface, FILE *fp, int png_compression_level, int png_filter ,
+extern int ScreenSnapShot_SavePNG_ToFile(SDL_Surface *surface, int destw,
+		int desth, FILE *fp, int png_compression_level, int png_filter,
 		int CropLeft , int CropRight , int CropTop , int CropBottom );
 extern void ScreenSnapShot_SaveScreen(void);
+extern void ScreenSnapShot_SaveToFile(const char *filename);
 
 #endif /* ifndef HATARI_SCREENSNAPSHOT_H */
-

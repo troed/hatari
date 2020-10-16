@@ -6,9 +6,10 @@
 
   Table with hardware IO handlers for the Falcon.
 */
-const char IoMemTabFalc_fileid[] = "Hatari ioMemTabFalcon.c : " __DATE__ " " __TIME__;
+const char IoMemTabFalc_fileid[] = "Hatari ioMemTabFalcon.c";
 
 #include "main.h"
+#include "configuration.h"
 #include "fdc.h"
 #include "acia.h"
 #include "ioMem.h"
@@ -21,12 +22,14 @@ const char IoMemTabFalc_fileid[] = "Hatari ioMemTabFalcon.c : " __DATE__ " " __T
 #include "psg.h"
 #include "rs232.h"
 #include "rtc.h"
+#include "scc.h"
 #include "screen.h"
 #include "blitter.h"
 #include "crossbar.h"
 #include "falcon/videl.h"
 #include "configuration.h"
 #include "statusbar.h"
+#include "stMemory.h"
 #if ENABLE_DSP_EMU
 #include "falcon/dsp.h"
 #endif
@@ -37,12 +40,15 @@ const char IoMemTabFalc_fileid[] = "Hatari ioMemTabFalcon.c : " __DATE__ " " __T
 void IoMemTabFalcon_DSPnone(void (**readtab)(void), void (**writetab)(void))
 {
 	int i, offset;
+
 	offset = 0xffa200 - 0xff8000;
-	for (i = 0; i < 8; i++) {
+	for (i = 0; i < 8; i++)
+	{
 		readtab[offset+i] = IoMem_ReadWithoutInterception;
 	}
 	readtab[offset+2] = IoMem_VoidRead;	/* TODO: why this is needed */
-	for (i = 0; i < 8; i++) {
+	for (i = 0; i < 8; i++)
+	{
 		writetab[offset+i] = IoMem_WriteWithoutInterception;
 	}
 }
@@ -71,14 +77,17 @@ static void DSP_DummyInterruptStatus_ReadByte(void)
 void IoMemTabFalcon_DSPdummy(void (**readtab)(void), void (**writetab)(void))
 {
 	int i, offset;
+
 	offset = 0xffa200 - 0xff8000;
 	readtab[offset+0] = IoMem_ReadWithoutInterception;
 	readtab[offset+1] = DSP_DummyHostCommand_ReadByte;
 	readtab[offset+2] = DSP_DummyInterruptStatus_ReadByte;
-	for (i = 3; i < 8; i++) {
+	for (i = 3; i < 8; i++)
+	{
 		readtab[offset+i] = IoMem_ReadWithoutInterception;
 	}
-	for (i = 0; i < 8; i++) {
+	for (i = 0; i < 8; i++)
+	{
 		writetab[offset+i] = IoMem_WriteWithoutInterception;
 	}
 }
@@ -90,8 +99,10 @@ void IoMemTabFalcon_DSPdummy(void (**readtab)(void), void (**writetab)(void))
 void IoMemTabFalcon_DSPemulation(void (**readtab)(void), void (**writetab)(void))
 {
 	int i, offset;
+
 	offset = 0xffa200 - 0xff8000;
-	for (i = 0; i < 8; i++) {
+	for (i = 0; i < 8; i++)
+	{
 		readtab[offset+i]  = DSP_HandleReadAccess;
 		writetab[offset+i] = DSP_HandleWriteAccess;
 	}
@@ -102,7 +113,7 @@ void IoMemTabFalcon_DSPemulation(void (**readtab)(void), void (**writetab)(void)
 /**
  * Take into account the Falcon Bus Control register $ff8007.b
 	$FFFF8007 Falcon Bus Control
-		BIT 6 : F30 Start (0=Cold, 1=Warm) 
+		BIT 6 : F30 Start (0=Cold, 1=Warm)
 		BIT 5 : STe Bus Emulation (0=on)
 		BIT 3 : Blitter Flag (0=on, 1=off)
 		BIT 2 : Blitter (0=8mhz, 1=16mhz)
@@ -111,27 +122,107 @@ void IoMemTabFalcon_DSPemulation(void (**readtab)(void), void (**writetab)(void)
 static void IoMemTabFalcon_BusCtrl_WriteByte(void)
 {
 	Uint8 busCtrl = IoMem_ReadByte(0xff8007);
-	
+
 	/* Set Falcon bus or STE compatible bus emulation */
 	if ((busCtrl & 0x20) == 0)
-		IoMem_Init_FalconInSTeBuscompatibilityMode(0);
+		IoMem_SetFalconBusMode(STE_BUS_COMPATIBLE);
 	else
-		IoMem_Init_FalconInSTeBuscompatibilityMode(1);
+		IoMem_SetFalconBusMode(FALCON_ONLY_BUS);
 
-	/* 68030 Frequency changed ? */
-	if ((busCtrl & 0x1) == 1) {
-		/* 16 Mhz bus for 68030 */
-		nCpuFreqShift = 1;
-		ConfigureParams.System.nCpuFreq = 16;
+	/* 68030 Frequency changed ? We change freq only in 68030 mode
+	 * for a normal Falcon, not if CPU is 68040 or 68060 is used,
+	 * or if the user requested a faster frequency manually */
+	if (ConfigureParams.System.nCpuLevel == 3 && ConfigureParams.System.nCpuFreq <= 16)
+	{
+		if ((busCtrl & 0x1) == 1) {
+			/* 16 Mhz bus for 68030 */
+			Configuration_ChangeCpuFreq ( 16 );
+		}
+		else {
+			/* 8 Mhz bus for 68030 */
+			Configuration_ChangeCpuFreq ( 8 );
+		}
 	}
-	else {
-		/* 8 Mhz bus for 68030 */
-		nCpuFreqShift = 0;
-		ConfigureParams.System.nCpuFreq = 8;
-	}
-	Statusbar_UpdateInfo();							/* Update clock speed in the status bar */
+	Statusbar_UpdateInfo();			/* Update clock speed in the status bar */
 }
 
+static void IoMemTabFalcon_BusCtrl_ReadByte(void)
+{
+	Uint8 nBusCtrl = IoMem_ReadByte(0xff8007);
+
+	/* Set the bit manually to get it right after cold boot */
+	if (IoMem_IsFalconBusMode())
+		nBusCtrl |= 0x20;
+	else
+		nBusCtrl &= ~0x20;
+
+	if (ConfigureParams.System.nCpuFreq == 8)
+		nBusCtrl &= ~1;
+	else
+		nBusCtrl |= 1;
+
+	IoMem_WriteByte(0xff8007, nBusCtrl);
+}
+
+
+/**
+ * This register represents the configuration switches ("half moon" soldering
+ * points) on the Falcon's motherboard at location U46 and U47. The meaning
+ * of the switches is the following:
+ *
+ *  1-5   Not used
+ *   6    Connected = Quad Density Floppy; not connected = Don't care
+ *   7    Connected = AJAX FDC (1.44MB); not connected = 1772 FDC (720K)
+ *   8    Connected = No DMA sound; not connected = DMA Sound available
+ *
+ * Logic is inverted, i.e. connected means the corresponding bit is 0.
+ * Switch 8 is represented by the highest bit in the register.
+ */
+Uint8 IoMemTabFalcon_DIPSwitches_Read(void)
+{
+	return 0xbf;
+}
+
+
+/**
+ * Some IO memory ranges do not result in a bus error when accessed
+ * in STE-compatible bus mode and with single byte access.
+ */
+static void IoMemTabFalc_Compatible_ReadByte(void)
+{
+	if (nIoMemAccessSize != SIZE_BYTE || IoMem_IsFalconBusMode())
+	{
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, nIoMemAccessSize, BUS_ERROR_ACCESS_DATA, 0);
+	}
+}
+
+static void IoMemTabFalc_Compatible_WriteByte(void)
+{
+	if (nIoMemAccessSize != SIZE_BYTE || IoMem_IsFalconBusMode())
+	{
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, nIoMemAccessSize, BUS_ERROR_ACCESS_DATA, 0);
+	}
+}
+
+/**
+ * Some IO memory ranges do not result in a bus error when
+ * accessed in STE-compatible bus mode and with word access.
+ */
+static void IoMemTabFalc_Compatible_ReadWord(void)
+{
+	if (nIoMemAccessSize == SIZE_BYTE || IoMem_IsFalconBusMode())
+	{
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, nIoMemAccessSize, BUS_ERROR_ACCESS_DATA, 0);
+	}
+}
+
+static void IoMemTabFalc_Compatible_WriteWord(void)
+{
+	if (nIoMemAccessSize == SIZE_BYTE || IoMem_IsFalconBusMode())
+	{
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, nIoMemAccessSize, BUS_ERROR_ACCESS_DATA,0);
+	}
+}
 
 /*-----------------------------------------------------------------------*/
 /*
@@ -140,9 +231,9 @@ static void IoMemTabFalcon_BusCtrl_WriteByte(void)
 const INTERCEPT_ACCESS_FUNC IoMemTable_Falcon[] =
 {
 	{ 0xff8000, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
-	{ 0xff8001, SIZE_BYTE, IoMem_ReadWithoutInterception, IoMem_WriteWithoutInterception }, /* Memory configuration */
+	{ 0xff8001, SIZE_BYTE, STMemory_MMU_Config_ReadByte, STMemory_MMU_Config_WriteByte },	/* Memory configuration */
 	{ 0xff8006, SIZE_BYTE, IoMem_ReadWithoutInterception, VIDEL_Monitor_WriteByte },        /* Falcon monitor and memory configuration */
-	{ 0xff8007, SIZE_BYTE, IoMem_ReadWithoutInterception, IoMemTabFalcon_BusCtrl_WriteByte }, /* Falcon bus configuration */
+	{ 0xff8007, SIZE_BYTE, IoMemTabFalcon_BusCtrl_ReadByte, IoMemTabFalcon_BusCtrl_WriteByte }, /* Falcon bus configuration */
 	{ 0xff800C, SIZE_WORD, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
 	{ 0xff8060, SIZE_LONG, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
 
@@ -160,7 +251,7 @@ const INTERCEPT_ACCESS_FUNC IoMemTable_Falcon[] =
 	{ 0xff820b, SIZE_BYTE, IoMem_VoidRead_00, IoMem_VoidWrite },                            /* No bus error here : return 0 not ff */
 	{ 0xff820c, SIZE_BYTE, IoMem_VoidRead_00, IoMem_VoidWrite },                            /* No bus error here : return 0 not ff */
 	{ 0xff820d, SIZE_BYTE, IoMem_ReadWithoutInterception, VIDEL_ScreenBase_WriteByte },     /* Video base low byte */
-	{ 0xff820e, SIZE_WORD, IoMem_ReadWithoutInterception, VIDEL_LineOffset_WriteWord },     /* Falcon line offset */
+	{ 0xff820e, SIZE_WORD, VIDEL_LineOffset_ReadWord, VIDEL_LineOffset_WriteWord },         /* Falcon line offset */
 	{ 0xff8210, SIZE_WORD, IoMem_ReadWithoutInterception, VIDEL_Line_Width_WriteWord },     /* Falcon line width */
 	{ 0xff8212, 46       , IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
 
@@ -209,6 +300,9 @@ const INTERCEPT_ACCESS_FUNC IoMemTable_Falcon[] =
 	{ 0xff82c0, SIZE_WORD, IoMem_ReadWithoutInterception, VIDEL_VCO_WriteWord },            /* VCO - Video control */
 	{ 0xff82c2, SIZE_WORD, IoMem_ReadWithoutInterception, VIDEL_VMD_WriteWord },            /* VMD - Video mode */
 
+	{ 0xff8560, SIZE_BYTE, IoMemTabFalc_Compatible_ReadByte, IoMemTabFalc_Compatible_WriteByte },
+	{ 0xff8564, SIZE_BYTE, IoMemTabFalc_Compatible_ReadByte, IoMemTabFalc_Compatible_WriteByte },
+
 	{ 0xff8604, SIZE_WORD, FDC_DiskControllerStatus_ReadWord, FDC_DiskController_WriteWord },
 	{ 0xff8606, SIZE_WORD, FDC_DmaStatus_ReadWord, FDC_DmaModeControl_WriteWord },
 	{ 0xff8608, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
@@ -217,8 +311,7 @@ const INTERCEPT_ACCESS_FUNC IoMemTable_Falcon[] =
 	{ 0xff860b, SIZE_BYTE, FDC_DmaAddress_ReadByte, FDC_DmaAddress_WriteByte },		/* DMA base and counter med byte  */
 	{ 0xff860c, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
 	{ 0xff860d, SIZE_BYTE, FDC_DmaAddress_ReadByte, FDC_DmaAddress_WriteByte },		/* DMA base and counter low byte  */
-	{ 0xff860e, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
-	{ 0xff860f, SIZE_BYTE, FDC_FloppyMode_ReadByte, FDC_FloppyMode_WriteByte },             /* Floppy mode (?) register */
+	{ 0xff860e, SIZE_WORD, FDC_DensityMode_ReadWord , FDC_DensityMode_WriteWord },		/* Choose DD/HD mode */
 
 	{ 0xff8800, SIZE_BYTE, PSG_ff8800_ReadByte, PSG_ff8800_WriteByte },
 	{ 0xff8801, SIZE_BYTE, PSG_ff880x_ReadByte, PSG_ff8801_WriteByte },
@@ -300,13 +393,12 @@ const INTERCEPT_ACCESS_FUNC IoMemTable_Falcon[] =
 	{ 0xff8a3b, SIZE_BYTE, Blitter_LogOp_ReadByte, Blitter_LogOp_WriteByte },
 	{ 0xff8a3c, SIZE_BYTE, Blitter_Control_ReadByte, Blitter_Control_WriteByte },
 	{ 0xff8a3d, SIZE_BYTE, Blitter_Skew_ReadByte, Blitter_Skew_WriteByte },
-	{ 0xff8a3e, SIZE_WORD, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
+	{ 0xff8a3e, SIZE_WORD, IoMem_VoidRead, IoMem_VoidWrite },                         /* No bus error here */
 
-	{ 0xff8c80, 8, IoMem_VoidRead, IoMem_WriteWithoutInterception },                        /* TODO: SCC */
+	{ 0xff8c80, 8, SCC_IoMem_ReadByte, SCC_IoMem_WriteByte },                         /* SCC */
 
-	{ 0xff9200, SIZE_WORD, Joy_StePadButtons_ReadWord, IoMem_WriteWithoutInterception }, /* Joypad fire buttons */
+	{ 0xff9200, SIZE_WORD, Joy_StePadButtons_DIPSwitches_ReadWord, Joy_StePadButtons_DIPSwitches_WriteWord },    /* Joypad fire buttons + Falcon DIP Switches */
 	{ 0xff9202, SIZE_WORD, Joy_StePadMulti_ReadWord, Joy_StePadMulti_WriteWord },     /* Joypad directions/buttons/selection */
-	{ 0xff9206, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                         /* No bus error here ; fix Wotanoid game */
 	{ 0xff9210, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                         /* No bus error here */
 	{ 0xff9211, SIZE_BYTE, IoMem_VoidRead, IoMem_WriteWithoutInterception },          /* Joypad 0 X position (?) */
 	{ 0xff9212, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                         /* No bus error here */
@@ -319,6 +411,15 @@ const INTERCEPT_ACCESS_FUNC IoMemTable_Falcon[] =
 	{ 0xff9222, SIZE_WORD, IoMem_VoidRead, IoMem_WriteWithoutInterception },          /* Lightpen Y position */
 
 	{ 0xff9800, 0x400, IoMem_ReadWithoutInterception, VIDEL_FalconColorRegsWrite },   /* Falcon Videl palette */
+
+	{ 0xffc020, SIZE_BYTE, IoMemTabFalc_Compatible_ReadByte, IoMemTabFalc_Compatible_WriteByte },
+	{ 0xffc021, SIZE_BYTE, IoMemTabFalc_Compatible_ReadByte, IoMemTabFalc_Compatible_WriteByte },
+	{ 0xffd020, SIZE_BYTE, IoMemTabFalc_Compatible_ReadByte, IoMemTabFalc_Compatible_WriteByte },
+	{ 0xffd074, SIZE_WORD, IoMemTabFalc_Compatible_ReadWord, IoMemTabFalc_Compatible_WriteWord },
+	{ 0xffd420, SIZE_BYTE, IoMemTabFalc_Compatible_ReadByte, IoMemTabFalc_Compatible_WriteByte },
+	{ 0xffd425, SIZE_BYTE, IoMemTabFalc_Compatible_ReadByte, IoMemTabFalc_Compatible_WriteByte },
+	{ 0xffd520, SIZE_WORD, IoMemTabFalc_Compatible_ReadWord, IoMemTabFalc_Compatible_WriteWord },
+	{ 0xffd530, SIZE_WORD, IoMemTabFalc_Compatible_ReadWord, IoMemTabFalc_Compatible_WriteWord },
 
 	{ 0xfffa00, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
 	{ 0xfffa01, SIZE_BYTE, MFP_GPIP_ReadByte, MFP_GPIP_WriteByte },

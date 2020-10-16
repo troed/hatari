@@ -1,8 +1,13 @@
 TODO
 ====
 
-This lists potential TODO items that aren't listed in the Hatari/UI
-sources.
+Potential TODO items for Hatari UI (in addition to the ones listed in
+its sources).
+
+* WinUAE CPU core specific configuration options:
+  - MMU
+  - FPU
+  - 32-bit addressing
 
 * Separate "Atari monitor" and "Hatari window" settings dialogs
   (move options from "Display" and monitor setting from "Machine"
@@ -10,13 +15,15 @@ sources.
 
 * Features for Help menu:
   - Create empty floppy images (+ convert directories to hard disks?)
-  - MSA converter
+  - MSA<->ST converter
+  - ZIP->ST converter
 
 * Add more Hatari debugger features to the debug UI:
   - DSP support
   - History support
   - Profiling support
-  - DSP and CPU symbols loading
+  - DSP symbols loading
+    (CPU symbols are loaded automatically from programs)
   - Support for stepping the emulation (both step & next commands)
   - multiple views to memory (refreshed whenever emulation is stopped)
     - supporting also register relative views (register values
@@ -45,14 +52,14 @@ sources.
     - needs support also to Hatari src/screenSnapShot.c
 
 * Supporting other, less important Hatari configuration options:
-  - HD booting, toggling disk-b autoinsertion
-  - something for multiple GEMDOS partition directories
+  - keyboard repeat, key mapping type & file, mouse warping & grabbing
+  - HD booting, something for multiple GEMDOS partition directories
   - separate A/B disk paths for images that are within ZIP archives
   - joystick autofire toggling, defining the keys for joyemu
-  - keyboard repeat, key mapping type and file, mouse grabbing
   - vdi planes and size, SDL bpp forcing, spec512 threshold, ST blitter
   - cartridge image (where? it has many limitations)
   - log file and levels, console output, bios intercept, run-VBLs
+
 (Many of these aren't supported by the internal Hatari UI either, or
 are missing corresponding command line options so they will require
 additional support on the Hatari control.c side too or they can

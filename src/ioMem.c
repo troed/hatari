@@ -28,7 +28,7 @@
   Also note the 'mirror' (or shadow) registers of the PSG - this is used by most
   games.
 */
-const char IoMem_fileid[] = "Hatari ioMem.c : " __DATE__ " " __TIME__;
+const char IoMem_fileid[] = "Hatari ioMem.c";
 
 #include "main.h"
 #include "configuration.h"
@@ -37,21 +37,50 @@ const char IoMem_fileid[] = "Hatari ioMem.c : " __DATE__ " " __TIME__;
 #include "memorySnapShot.h"
 #include "m68000.h"
 #include "sysdeps.h"
+#include "newcpu.h"
+#include "log.h"
+#include "scc.h"
+#include "fdc.h"
 
 
-static void (*pInterceptReadTable[0x8000])(void);     /* Table with read access handlers */
-static void (*pInterceptWriteTable[0x8000])(void);    /* Table with write access handlers */
+static void (*pInterceptReadTable[0x8000])(void);	/* Table with read access handlers */
+static void (*pInterceptWriteTable[0x8000])(void);	/* Table with write access handlers */
 
-int nIoMemAccessSize;                                 /* Set to 1, 2 or 4 according to byte, word or long word access */
-Uint32 IoAccessBaseAddress;                           /* Stores the base address of the IO mem access */
-Uint32 IoAccessCurrentAddress;                        /* Current byte address while handling WORD and LONG accesses */
-static int nBusErrorAccesses;                         /* Needed to count bus error accesses */
+int nIoMemAccessSize;					/* Set to 1, 2 or 4 according to byte, word or long word access */
+Uint32 IoAccessFullAddress;				/* Store the complete 32 bit address received in the IoMem_xxx() handler */
+							/* (this is the address to write on the stack in case of a bus error) */
+Uint32 IoAccessBaseAddress;				/* Stores the base address of the IO mem access (masked on 24 bits) */
+Uint32 IoAccessCurrentAddress;				/* Current byte address while handling WORD and LONG accesses (masked on 24 bits) */
+static int nBusErrorAccesses;				/* Needed to count bus error accesses */
+
+
+/*
+  Heuristics for better cycle accuracy when "cycle exact mode" is not used
+
+  Some instructions can do several IO accesses that will be seen as several independent accesses,
+  instead of one whole word or long word access as in the size of the instruction.
+  For example :
+    - movep.w and move.l will do 2 or 4 BYTE accesses (and not 1 WORD or LONG WORD access)
+    - move.l will do 2 WORD accesses (and not 1 LONG WORD, because ST's bus is 16 bit)
+
+  So, when a BYTE access is made, we need to know if it comes from an instruction where size=byte
+  or if it comes from a word or long word instruction.
+
+  In order to emulate correct read/write cycles when IO regs are accessed this way, we need to
+  keep track of how many accesses were made by the same instruction.
+  This will be used when CPU runs in "prefetch mode" and we try to approximate internal cycles
+  (see cycles.c for heuristics using this).
+
+  When CPU runs in "cycle exact mode", this is not used because the internal cycles will be computed
+  precisely at the CPU emulation level.
+*/
+static Uint64	IoAccessInstrPrevClock;
+int		IoAccessInstrCount;			/* Number of the accesses made in the current instruction (1..4) */
+							/* 0 means no multiple accesses in the current instruction */
+
 
 /* Falcon bus mode (Falcon STe compatible bus or Falcon only bus) */
-static enum {
-	STE_BUS_COMPATIBLE,
-	FALCON_ONLY_BUS
-} falconBusMode;
+static enum FALCON_BUS_MODE falconBusMode = FALCON_ONLY_BUS;
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -59,8 +88,12 @@ static enum {
  */
 void IoMem_MemorySnapShot_Capture(bool bSave)
 {
+	enum FALCON_BUS_MODE mode = falconBusMode;
+
 	/* Save/Restore details */
-	MemorySnapShot_Store(&falconBusMode, sizeof(falconBusMode));
+	MemorySnapShot_Store(&mode, sizeof(mode));
+	if (!bSave)
+		IoMem_SetFalconBusMode(mode);
 }
 
 /*-----------------------------------------------------------------------*/
@@ -87,7 +120,145 @@ static void IoMem_SetBusErrorRegion(Uint32 startaddr, Uint32 endaddr)
 }
 
 
-/*-----------------------------------------------------------------------*/
+/**
+ * Fill a region with void handlers.
+ */
+static void IoMem_SetVoidRegion(Uint32 startaddr, Uint32 endaddr)
+{
+	Uint32 addr;
+
+	for (addr = startaddr; addr <= endaddr; addr++)
+	{
+		pInterceptReadTable[addr - 0xff8000] = IoMem_VoidRead;
+		pInterceptWriteTable[addr - 0xff8000] = IoMem_VoidWrite;
+	}
+}
+
+
+/**
+ * Normal ST (with Ricoh chipset) has two address which don't generate a bus
+ * error when compared to the Mega-ST (with IMP chipset). Mark them as void
+ * handlers here.
+ */
+static void IoMem_FixVoidAccessForST(void)
+{
+	IoMem_SetVoidRegion(0xff820f, 0xff820f);
+	IoMem_SetVoidRegion(0xff860f, 0xff860f);
+}
+
+/**
+ * We emulate the Mega-ST with IMP chipset, and this has slightly different
+ * behavior with regards to bus errors compared to the normal ST, which we
+ * emulate with Ricoh chipset. Here we fix up the table accordingly.
+ * Note that there are also normal STs with the IMP chipset, and Mega-STs
+ * with the Ricoh chipset available, so in real life this can also be the
+ * other way round. But since the Ricoh chipset is likely the older one
+ * and the Mega-STs are the later machines, we've chosen to use IMP for the
+ * Mega and Ricoh for normal STs in Hatari.
+ */
+static void IoMem_FixVoidAccessForMegaST(void)
+{
+	int i;
+	Uint32 no_be_addrs[] =
+	{
+		0xff8200, 0xff8202, 0xff8204, 0xff8206, 0xff8208,
+		0xff820c, 0xff8608, 0xff860a, 0xff860c, 0
+	};
+	Uint32 no_be_regions[][2] =
+	{
+		{ 0xff8000, 0xff8000 },
+		{ 0xff8002, 0xff800d },
+		{ 0xff8a3e, 0xff8a3f },
+		{ 0, 0 }
+	};
+
+	for (i = 0; no_be_addrs[i] != 0; i++)
+	{
+		IoMem_SetVoidRegion(no_be_addrs[i], no_be_addrs[i]);
+	}
+	for (i = 0; no_be_regions[i][0] != 0; i++)
+	{
+		IoMem_SetVoidRegion(no_be_regions[i][0], no_be_regions[i][1]);
+	}
+}
+
+
+/**
+ * Fix up the IO memory access table for the Mega STE.
+ */
+static void IoMem_FixAccessForMegaSTE(void)
+{
+	int addr;
+
+	/* Mega-STE has an additional Cache/CPU control register compared to
+	 * the normal STE. The addresses before and after 0xff8e21 also do not
+	 * produce a bus error on the Mega-STE. */
+	pInterceptReadTable[0xff8e20 - 0xff8000] = IoMem_VoidRead;
+	pInterceptWriteTable[0xff8e20 - 0xff8000] = IoMem_VoidWrite;
+	pInterceptReadTable[0xff8e21 - 0xff8000] = IoMem_ReadWithoutInterception;
+	pInterceptWriteTable[0xff8e21 - 0xff8000] = IoMemTabMegaSTE_CacheCpuCtrl_WriteByte;
+	pInterceptReadTable[0xff8e22 - 0xff8000] = IoMem_VoidRead;
+	pInterceptWriteTable[0xff8e22 - 0xff8000] = IoMem_VoidWrite;
+	pInterceptReadTable[0xff8e23 - 0xff8000] = IoMem_VoidRead;
+	pInterceptWriteTable[0xff8e23 - 0xff8000] = IoMem_VoidWrite;
+
+	/* VME bus - we don't support it yet, but TOS uses FF8E09 to detect the Mega-STE */
+	for (addr = 0xff8e01; addr <= 0xff8e0f; addr += 2)
+	{
+		pInterceptReadTable[addr - 0xff8000] = IoMem_ReadWithoutInterception;
+		pInterceptWriteTable[addr - 0xff8000] = IoMem_WriteWithoutInterception;
+	}
+
+	/* The Mega-STE has a Z85C30 SCC serial port, too: */
+	for (addr = 0xff8c80; addr <= 0xff8c87; addr++)
+	{
+		pInterceptReadTable[addr - 0xff8000] = SCC_IoMem_ReadByte;
+		pInterceptWriteTable[addr - 0xff8000] = SCC_IoMem_WriteByte;
+	}
+
+	/* The Mega-STE can choose between DD and HD mode when reading floppy */
+	/* This uses word register at 0xff860e */
+	for (addr = 0xff860e; addr <= 0xff860f; addr++)
+	{
+		pInterceptReadTable[addr - 0xff8000] = FDC_DensityMode_ReadWord;
+		pInterceptWriteTable[addr - 0xff8000] = FDC_DensityMode_WriteWord;
+	}
+}
+
+
+/**
+ * Fix up table for Falcon in STE compatible bus mode (i.e. less bus errors)
+ */
+static void IoMem_FixVoidAccessForCompatibleFalcon(void)
+{
+	int i;
+	Uint32 no_be_regions[][2] =
+	{
+		{ 0xff8002, 0xff8005 },
+		{ 0xff8008, 0xff800b },
+		{ 0xff800e, 0xff805f },
+		{ 0xff8064, 0xff81ff },
+		{ 0xff82c4, 0xff83ff },
+		{ 0xff8804, 0xff88ff },
+		{ 0xff8964, 0xff896f },
+		{ 0xff8c00, 0xff8c7f },
+		{ 0xff8c88, 0xff8cff },
+		{ 0xff9000, 0xff91ff },
+		{ 0xff9204, 0xff920f },
+		{ 0xff9218, 0xff921f },
+		{ 0xff9224, 0xff97ff },
+		{ 0xff9c00, 0xff9fff },
+		{ 0xffa200, 0xffa207 },
+		{ 0, 0 }
+	};
+
+	for (i = 0; no_be_regions[i][0] != 0; i++)
+	{
+		IoMem_SetVoidRegion(no_be_regions[i][0], no_be_regions[i][1]);
+	}
+}
+
+
 /**
  * Create 'intercept' tables for hardware address access. Each 'intercept
  * table is a list of 0x8000 pointers to a list of functions to call when
@@ -102,50 +273,28 @@ void IoMem_Init(void)
 	/* Set default IO access handler (-> bus error) */
 	IoMem_SetBusErrorRegion(0xff8000, 0xffffff);
 
-
-	/* Initialize STe bus specific registers for Falcon in FALCON STe compatible bus mode */
-	if ((ConfigureParams.System.nMachineType == MACHINE_FALCON) && (falconBusMode == STE_BUS_COMPATIBLE)) {
-		for (addr = 0xff8000; addr < 0xffd426; addr++)
-		{
-			if ( ((addr >= 0xff8002) && (addr < 0xff8006)) ||
-				 ((addr >= 0xff8008) && (addr < 0xff800c)) ||
-				 ((addr >= 0xff800e) && (addr < 0xff8060)) ||
-				 ((addr >= 0xff8064) && (addr < 0xff8200)) ||
-				 ((addr >= 0xff82c4) && (addr < 0xff8400)) ||
-				  (addr == 0xff8560)                       ||
-				  (addr == 0xff8564)                       ||
-				 ((addr >= 0xff8804) && (addr < 0xff8900)) ||
-				 ((addr >= 0xff8964) && (addr < 0xff8970)) ||
-				 ((addr >= 0xff8c00) && (addr < 0xff8c80)) ||
-				 ((addr >= 0xff8c88) && (addr < 0xff8d00)) ||
-				 ((addr >= 0xff9000) && (addr < 0xff9200)) ||
-				 ((addr >= 0xff9204) && (addr < 0xff9206)) ||
-				 ((addr >= 0xff9207) && (addr < 0xff9210)) ||
-				 ((addr >= 0xff9218) && (addr < 0xff9220)) ||
-				 ((addr >= 0xff9224) && (addr < 0xff9800)) ||
-				 ((addr >= 0xff9c00) && (addr < 0xffa000)) ||
-				 ((addr >= 0xffa200) && (addr < 0xffa208)) ||
-				  (addr == 0xffc020)                       ||
-				  (addr == 0xffc021)                       ||
-				  (addr == 0xffd020)                       ||
-				  (addr == 0xffd021)                       ||
-				  (addr == 0xffd420)                       ||
-				  (addr == 0xffd421)                       ||
-				  (addr == 0xffd425)
-			  ) {
-					pInterceptReadTable[addr - 0xff8000] = IoMem_VoidRead;      /* For 'read' */
-					pInterceptWriteTable[addr - 0xff8000] = IoMem_VoidWrite;    /* and 'write' */
- 			    }
-		}
-	}
-
 	switch (ConfigureParams.System.nMachineType)
 	{
-		case MACHINE_ST:  pInterceptAccessFuncs = IoMemTable_ST; break;
-		case MACHINE_STE: pInterceptAccessFuncs = IoMemTable_STE; break;
-		case MACHINE_TT: pInterceptAccessFuncs = IoMemTable_TT; break;
-		case MACHINE_FALCON: pInterceptAccessFuncs = IoMemTable_Falcon; break;
-		default: abort(); /* bug */
+	 case MACHINE_ST:
+		pInterceptAccessFuncs = IoMemTable_ST;
+		break;
+	 case MACHINE_MEGA_ST:
+		pInterceptAccessFuncs = IoMemTable_ST;
+		break;
+	 case MACHINE_STE:
+		pInterceptAccessFuncs = IoMemTable_STE;
+		break;
+	 case MACHINE_MEGA_STE:
+		pInterceptAccessFuncs = IoMemTable_STE;
+		break;
+	 case MACHINE_TT:
+		pInterceptAccessFuncs = IoMemTable_TT;
+		break;
+	 case MACHINE_FALCON:
+		pInterceptAccessFuncs = IoMemTable_Falcon;
+		break;
+	 default:
+		abort(); /* bug */
 	}
 
 	/* Now set the correct handlers */
@@ -159,9 +308,9 @@ void IoMem_Init(void)
 			{
 				/* Security checks... */
 				if (pInterceptReadTable[addr-0xff8000] != IoMem_BusErrorEvenReadAccess && pInterceptReadTable[addr-0xff8000] != IoMem_BusErrorOddReadAccess)
-					fprintf(stderr, "IoMem_Init: Warning: $%x (R) already defined\n", addr);
+					Log_Printf(LOG_WARN, "IoMem_Init: $%x (R) already defined\n", addr);
 				if (pInterceptWriteTable[addr-0xff8000] != IoMem_BusErrorEvenWriteAccess && pInterceptWriteTable[addr-0xff8000] != IoMem_BusErrorOddWriteAccess)
-					fprintf(stderr, "IoMem_Init: Warning: $%x (W) already defined\n", addr);
+					Log_Printf(LOG_WARN, "IoMem_Init: $%x (W) already defined\n", addr);
 
 				/* This location needs to be intercepted, so add entry to list */
 				pInterceptReadTable[addr-0xff8000] = pInterceptAccessFuncs[i].ReadFunc;
@@ -170,9 +319,23 @@ void IoMem_Init(void)
 		}
 	}
 
-	/* Set registers for Falcon DSP emulation */
-	if (ConfigureParams.System.nMachineType == MACHINE_FALCON)
+	/* After the IO access handlers were set, some machines with common IoMemTable_xxx */
+	/* will require some extra changes (eg: ST vs MegaST, STE ve MegaSTE) */
+	if ( ConfigureParams.System.nMachineType == MACHINE_ST )
+		IoMem_FixVoidAccessForST();
+	else if ( ConfigureParams.System.nMachineType == MACHINE_MEGA_ST )
+		IoMem_FixVoidAccessForMegaST();
+	else if ( ConfigureParams.System.nMachineType == MACHINE_MEGA_STE )
+		IoMem_FixAccessForMegaSTE();
+
+
+	/* Set registers for Falcon */
+	if (Config_IsMachineFalcon())
 	{
+		if (falconBusMode == STE_BUS_COMPATIBLE)
+			IoMem_FixVoidAccessForCompatibleFalcon();
+
+		/* Set registers for Falcon DSP emulation */
 		switch (ConfigureParams.System.nDSPType)
 		{
 #if ENABLE_DSP_EMU
@@ -198,8 +361,9 @@ void IoMem_Init(void)
 		IoMem_SetBusErrorRegion(0xff8a00, 0xff8a3f);
 	}
 
-	/* Disable real time clock? */
-	if (!ConfigureParams.System.bRealTimeClock)
+	/* Disable real time clock on non-Mega machines */
+	if (ConfigureParams.System.nMachineType == MACHINE_ST
+	    || ConfigureParams.System.nMachineType == MACHINE_STE)
 	{
 		for (addr = 0xfffc21; addr <= 0xfffc3f; addr++)
 		{
@@ -208,44 +372,22 @@ void IoMem_Init(void)
 		}
 	}
 
-	/* Initialize PSG shadow registers for ST, STe, TT machines */
-	if (ConfigureParams.System.nMachineType != MACHINE_FALCON)
+	/* Falcon PSG shadow register range setup (to void access) is already
+	 * done above as part of the IoMem_FixVoidAccessForCompatibleFalcon()
+	 * call (in STE bus compatible mode, otherwise they bus error)
+	 */
+	if (!Config_IsMachineFalcon())
 	{
+		/* Initialize PSG shadow registers for ST, STe, TT machines */
 		for (addr = 0xff8804; addr < 0xff8900; addr++)
 		{
 			pInterceptReadTable[addr - 0xff8000] = pInterceptReadTable[(addr & 0xfff803) - 0xff8000];
 			pInterceptWriteTable[addr - 0xff8000] = pInterceptWriteTable[(addr & 0xfff803) - 0xff8000];
 		}
 	}
-	else {
-		/* Initialize PSG shadow registers for Falcon machine when in STe bus compatibility mode */
-		if (falconBusMode == STE_BUS_COMPATIBLE) {
-			for (addr = 0xff8804; addr < 0xff8900; addr++)
-			{
-				pInterceptReadTable[addr - 0xff8000] = IoMem_VoidRead;     /* For 'read' */
-				pInterceptWriteTable[addr - 0xff8000] = IoMem_VoidWrite;   /* and 'write' */
-			}
-
-		}
-	}
 }
 
-/*-----------------------------------------------------------------------*/
-/**
- * This function is called to fix falconBusMode (0 = Falcon STe bus compatibility, other value = Falcon only bus compatibility)
- * This value comes from register $ff8007.b (Bit 5) and is called by ioMemTabFalcon
- */
-void IoMem_Init_FalconInSTeBuscompatibilityMode(Uint8 value)
-{
-	if (value == 0)
-		falconBusMode = STE_BUS_COMPATIBLE;
-	else
-		falconBusMode = FALCON_ONLY_BUS;
 
-	IoMem_Init();
-}
-
-/*-----------------------------------------------------------------------*/
 /**
  * Uninitialize the IoMem code (currently unused).
  */
@@ -254,20 +396,65 @@ void IoMem_UnInit(void)
 }
 
 
+/**
+ * This function is called to fix falconBusMode. This value comes from register
+ * $ff8007.b (Bit 5) and is called from ioMemTabFalcon.c.
+ */
+void IoMem_SetFalconBusMode(enum FALCON_BUS_MODE mode)
+{
+	if (mode != falconBusMode)
+	{
+		falconBusMode = mode;
+		IoMem_UnInit();
+		IoMem_Init();
+	}
+}
+
+bool IoMem_IsFalconBusMode(void)
+{
+	return falconBusMode == FALCON_ONLY_BUS;
+}
+
+
+/**
+ * During (cold) reset, we have to clean up the Falcon bus mode if necessary.
+ */
+void IoMem_Reset(void)
+{
+	if (Config_IsMachineFalcon())
+	{
+		IoMem_SetFalconBusMode(FALCON_ONLY_BUS);
+	}
+}
+
 /*-----------------------------------------------------------------------*/
 /**
  * Handle byte read access from IO memory.
  */
-uae_u32 IoMem_bget(uaecptr addr)
+uae_u32 REGPARAM3 IoMem_bget(uaecptr addr)
 {
 	Uint8 val;
 
+	IoAccessFullAddress = addr;			/* Store initial 32 bits address (eg for bus error stack) */
+
+	/* Check if access is made by a new instruction or by the same instruction doing multiple byte accesses */
+	if ( IoAccessInstrPrevClock == CyclesGlobalClockCounter )
+		IoAccessInstrCount++;			/* Same instruction, increase access count */
+	else
+	{
+		IoAccessInstrPrevClock = CyclesGlobalClockCounter;
+		if ( table68k[ M68000_CurrentOpcode ].size == 0 )
+			IoAccessInstrCount = 0;		/* Instruction size is byte : no multiple accesses */
+		else
+			IoAccessInstrCount = 1;		/* 1st access */
+	}
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	if (addr < 0xff8000 || !regs.s)
+	if (addr < 0xff8000 || !is_super_access(true))
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 
@@ -281,13 +468,13 @@ uae_u32 IoMem_bget(uaecptr addr)
 	/* Check if we read from a bus-error region */
 	if (nBusErrorAccesses == 1)
 	{
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 
 	val = IoMem[addr];
 
-	LOG_TRACE(TRACE_IOMEM_RD, "IO read.b $%06x = $%02x pc=%x\n", addr, val, M68000_GetPC());
+	LOG_TRACE(TRACE_IOMEM_RD, "IO read.b $%08x = $%02x pc=%x\n", IoAccessFullAddress, val, M68000_GetPC());
 
 	return val;
 }
@@ -297,22 +484,37 @@ uae_u32 IoMem_bget(uaecptr addr)
 /**
  * Handle word read access from IO memory.
  */
-uae_u32 IoMem_wget(uaecptr addr)
+uae_u32 REGPARAM3 IoMem_wget(uaecptr addr)
 {
 	Uint32 idx;
 	Uint16 val;
 
+	IoAccessFullAddress = addr;			/* Store initial 32 bits address (eg for bus error stack) */
+
+	/* Check if access is made by a new instruction or by the same instruction doing multiple word accesses */
+	if ( IoAccessInstrPrevClock == CyclesGlobalClockCounter )
+		IoAccessInstrCount++;			/* Same instruction, increase access count */
+	else
+	{
+		IoAccessInstrPrevClock = CyclesGlobalClockCounter;
+		if ( ( table68k[ M68000_CurrentOpcode ].size == 1 )
+		  && ( OpcodeFamily != i_MVMEL ) && ( OpcodeFamily != i_MVMLE ) )
+			IoAccessInstrCount = 0;		/* Instruction size is word and not a movem : no multiple accesses */
+		else
+			IoAccessInstrCount = 1;		/* 1st access of a long or movem.w */
+	}
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	if (addr < 0xff8000 || !regs.s)
+	if (addr < 0xff8000 || !is_super_access(true))
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_WORD, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 	if (addr > 0xfffffe)
 	{
-		fprintf(stderr, "Illegal IO memory access: IoMem_wget($%x)\n", addr);
+		Log_Printf(LOG_WARN, "Illegal IO memory access: IoMem_wget($%x)\n", addr);
 		return -1;
 	}
 
@@ -333,13 +535,13 @@ uae_u32 IoMem_wget(uaecptr addr)
 	/* Check if we completely read from a bus-error region */
 	if (nBusErrorAccesses == 2)
 	{
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_WORD, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 
 	val = IoMem_ReadWord(addr);
 
-	LOG_TRACE(TRACE_IOMEM_RD, "IO read.w $%06x = $%04x pc=%x\n", addr, val, M68000_GetPC());
+	LOG_TRACE(TRACE_IOMEM_RD, "IO read.w $%08x = $%04x pc=%x\n", IoAccessFullAddress, val, M68000_GetPC());
 
 	return val;
 }
@@ -349,23 +551,37 @@ uae_u32 IoMem_wget(uaecptr addr)
 /**
  * Handle long-word read access from IO memory.
  */
-uae_u32 IoMem_lget(uaecptr addr)
+uae_u32 REGPARAM3 IoMem_lget(uaecptr addr)
 {
 	Uint32 idx;
 	Uint32 val;
 	int n;
 
+	IoAccessFullAddress = addr;			/* Store initial 32 bits address (eg for bus error stack) */
+
+	/* Check if access is made by a new instruction or by the same instruction doing multiple long accesses */
+	if ( IoAccessInstrPrevClock == CyclesGlobalClockCounter )
+		IoAccessInstrCount++;			/* Same instruction, increase access count */
+	else
+	{
+		IoAccessInstrPrevClock = CyclesGlobalClockCounter;
+		if ( ( OpcodeFamily != i_MVMEL ) && ( OpcodeFamily != i_MVMLE ) )
+			IoAccessInstrCount = 0;		/* Instruction is not a movem : no multiple accesses */
+		else
+			IoAccessInstrCount = 1;		/* 1st access of a movem.l */
+	}
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	if (addr < 0xff8000 || !regs.s)
+	if (addr < 0xff8000 || !is_super_access(true))
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_LONG, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 	if (addr > 0xfffffc)
 	{
-		fprintf(stderr, "Illegal IO memory access: IoMem_lget($%x)\n", addr);
+		Log_Printf(LOG_WARN, "Illegal IO memory access: IoMem_lget($%x)\n", addr);
 		return -1;
 	}
 
@@ -389,13 +605,13 @@ uae_u32 IoMem_lget(uaecptr addr)
 	/* Check if we completely read from a bus-error region */
 	if (nBusErrorAccesses == 4)
 	{
-		M68000_BusError(addr, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_LONG, BUS_ERROR_ACCESS_DATA, 0);
 		return -1;
 	}
 
 	val = IoMem_ReadLong(addr);
 
-	LOG_TRACE(TRACE_IOMEM_RD, "IO read.l $%06x = $%08x pc=%x\n", addr, val, M68000_GetPC());
+	LOG_TRACE(TRACE_IOMEM_RD, "IO read.l $%08x = $%08x pc=%x\n", IoAccessFullAddress, val, M68000_GetPC());
 
 	return val;
 }
@@ -405,16 +621,30 @@ uae_u32 IoMem_lget(uaecptr addr)
 /**
  * Handle byte write access to IO memory.
  */
-void IoMem_bput(uaecptr addr, uae_u32 val)
+void REGPARAM3 IoMem_bput(uaecptr addr, uae_u32 val)
 {
+	IoAccessFullAddress = addr;			/* Store initial 32 bits address (eg for bus error stack) */
+
+	/* Check if access is made by a new instruction or by the same instruction doing multiple byte accesses */
+	if ( IoAccessInstrPrevClock == CyclesGlobalClockCounter )
+		IoAccessInstrCount++;			/* Same instruction, increase access count */
+	else
+	{
+		IoAccessInstrPrevClock = CyclesGlobalClockCounter;
+		if ( table68k[ M68000_CurrentOpcode ].size == 0 )
+			IoAccessInstrCount = 0;		/* Instruction size is byte : no multiple accesses */
+		else
+			IoAccessInstrCount = 1;		/* 1st access */
+	}
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	LOG_TRACE(TRACE_IOMEM_WR, "IO write.b $%06x = $%02x pc=%x\n", addr, val&0x0ff, M68000_GetPC());
+	LOG_TRACE(TRACE_IOMEM_WR, "IO write.b $%08x = $%02x pc=%x\n", IoAccessFullAddress, val&0xff, M68000_GetPC());
 
-	if (addr < 0xff8000 || !regs.s)
+	if (addr < 0xff8000 || !is_super_access(false))
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, val);
 		return;
 	}
 
@@ -430,7 +660,7 @@ void IoMem_bput(uaecptr addr, uae_u32 val)
 	/* Check if we wrote to a bus-error region */
 	if (nBusErrorAccesses == 1)
 	{
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, val);
 	}
 }
 
@@ -439,23 +669,38 @@ void IoMem_bput(uaecptr addr, uae_u32 val)
 /**
  * Handle word write access to IO memory.
  */
-void IoMem_wput(uaecptr addr, uae_u32 val)
+void REGPARAM3 IoMem_wput(uaecptr addr, uae_u32 val)
 {
 	Uint32 idx;
 
+	IoAccessFullAddress = addr;			/* Store initial 32 bits address (eg for bus error stack) */
+
+	/* Check if access is made by a new instruction or by the same instruction doing multiple word accesses */
+	if ( IoAccessInstrPrevClock == CyclesGlobalClockCounter )
+		IoAccessInstrCount++;			/* Same instruction, increase access count */
+	else
+	{
+		IoAccessInstrPrevClock = CyclesGlobalClockCounter;
+		if ( ( table68k[ M68000_CurrentOpcode ].size == 1 )
+		  && ( OpcodeFamily != i_MVMEL ) && ( OpcodeFamily != i_MVMLE ) )
+			IoAccessInstrCount = 0;		/* Instruction size is word and not a movem : no multiple accesses */
+		else
+			IoAccessInstrCount = 1;		/* 1st access of a long or movem.w */
+	}
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	LOG_TRACE(TRACE_IOMEM_WR, "IO write.w $%06x = $%04x pc=%x\n", addr, val&0x0ffff, M68000_GetPC());
+	LOG_TRACE(TRACE_IOMEM_WR, "IO write.w $%08x = $%04x pc=%x\n", IoAccessFullAddress, val&0xffff, M68000_GetPC());
 
-	if (addr < 0x00ff8000 || !regs.s)
+	if (addr < 0x00ff8000 || !is_super_access(false))
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_WORD, BUS_ERROR_ACCESS_DATA, val);
 		return;
 	}
 	if (addr > 0xfffffe)
 	{
-		fprintf(stderr, "Illegal IO memory access: IoMem_wput($%x)\n", addr);
+		Log_Printf(LOG_WARN, "Illegal IO memory access: IoMem_wput($%x)\n", addr);
 		return;
 	}
 
@@ -478,7 +723,7 @@ void IoMem_wput(uaecptr addr, uae_u32 val)
 	/* Check if we wrote to a bus-error region */
 	if (nBusErrorAccesses == 2)
 	{
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_WORD, BUS_ERROR_ACCESS_DATA, val);
 	}
 }
 
@@ -487,24 +732,38 @@ void IoMem_wput(uaecptr addr, uae_u32 val)
 /**
  * Handle long-word write access to IO memory.
  */
-void IoMem_lput(uaecptr addr, uae_u32 val)
+void REGPARAM3 IoMem_lput(uaecptr addr, uae_u32 val)
 {
 	Uint32 idx;
 	int n;
 
+	IoAccessFullAddress = addr;			/* Store initial 32 bits address (eg for bus error stack) */
+
+	/* Check if access is made by a new instruction or by the same instruction doing multiple long accesses */
+	if ( IoAccessInstrPrevClock == CyclesGlobalClockCounter )
+		IoAccessInstrCount++;			/* Same instruction, increase access count */
+	else
+	{
+		IoAccessInstrPrevClock = CyclesGlobalClockCounter;
+		if ( ( OpcodeFamily != i_MVMEL ) && ( OpcodeFamily != i_MVMLE ) )
+			IoAccessInstrCount = 0;		/* Instruction is not a movem : no multiple accesses */
+		else
+			IoAccessInstrCount = 1;		/* 1st access of a movem.l */
+	}
+
 	addr &= 0x00ffffff;                           /* Use a 24 bit address */
 
-	LOG_TRACE(TRACE_IOMEM_WR, "IO write.l $%06x = $%08x pc=%x\n", addr, val, M68000_GetPC());
+	LOG_TRACE(TRACE_IOMEM_WR, "IO write.l $%08x = $%08x pc=%x\n", IoAccessFullAddress, val, M68000_GetPC());
 
-	if (addr < 0xff8000 || !regs.s)
+	if (addr < 0xff8000 || !is_super_access(false))
 	{
 		/* invalid memory addressing --> bus error */
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_LONG, BUS_ERROR_ACCESS_DATA, val);
 		return;
 	}
 	if (addr > 0xfffffc)
 	{
-		fprintf(stderr, "Illegal IO memory access: IoMem_lput($%x)\n", addr);
+		Log_Printf(LOG_WARN, "Illegal IO memory access: IoMem_lput($%x)\n", addr);
 		return;
 	}
 
@@ -530,8 +789,29 @@ void IoMem_lput(uaecptr addr, uae_u32 val)
 	/* Check if we wrote to a bus-error region */
 	if (nBusErrorAccesses == 4)
 	{
-		M68000_BusError(addr, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_LONG, BUS_ERROR_ACCESS_DATA, val);
 	}
+}
+
+
+/*-------------------------------------------------------------------------*/
+/**
+ * Check if an address inside the IO mem region would return a bus error in case of a read/write access
+ * We only check if it would give a bus error on read access, as in our case it would give
+ * a bus error too in case of a write
+ */
+bool	IoMem_CheckBusError ( Uint32 addr )
+{
+	addr &= 0xffff;
+
+	if ( addr < 0x8000 )
+		return true;
+
+	if ( ( pInterceptReadTable[ addr - 0x8000 ] == IoMem_BusErrorOddReadAccess )
+	  || ( pInterceptReadTable[ addr - 0x8000 ] == IoMem_BusErrorEvenReadAccess ) )
+		return true;
+
+	return false;
 }
 
 

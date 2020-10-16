@@ -7,10 +7,11 @@
   debugdsp.c - function needed for the DSP debugging tasks like memory
   and register dumps.
 */
-const char DebugDsp_fileid[] = "Hatari debugdsp.c : " __DATE__ " " __TIME__;
+const char DebugDsp_fileid[] = "Hatari debugdsp.c";
 
 #include <stdio.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "config.h"
 
@@ -53,7 +54,7 @@ static char *DebugDsp_MatchRegister(const char *text, int state)
 		"omr", "pc", "sp", "sr", "ssh", "ssl",
 		"x0", "x1", "y0", "y1",
 	};
-	return DebugUI_MatchHelper(regs, ARRAYSIZE(regs), text, state);
+	return DebugUI_MatchHelper(regs, ARRAY_SIZE(regs), text, state);
 }
 
 /**
@@ -74,7 +75,8 @@ int DebugDsp_Register(int nArgc, char *psArgs[])
 	if (nArgc == 1)
 	{
 		/* No parameter - dump all registers */
-		DSP_DisasmRegisters();
+		DSP_DisasmRegisters(debugOutput);
+		fflush(debugOutput);
 		return DEBUGGER_CMDDONE;
 	}
 	arg = psArgs[1];
@@ -102,22 +104,29 @@ error_msg:
 /**
  * Check whether given address matches any DSP symbol and whether
  * there's profiling information available for it.  If yes, show it.
+ * 
+ * @return true if symbol was shown, false otherwise
  */
-static void DebugDsp_ShowAddressInfo(Uint16 addr)
+static bool DebugDsp_ShowAddressInfo(Uint16 addr, FILE *fp)
 {
-	const char *symbol = Symbols_GetByDspAddress(addr);
+	const char *symbol = Symbols_GetByDspAddress(addr, SYMTYPE_ALL);
 	if (symbol)
-		fprintf(debugOutput, "%s:\n", symbol);
+	{
+		fprintf(fp, "%s:\n", symbol);
+		return true;
+	}
+	return false;
 }
 
 
 /**
- * DSP dissassemble - arg = starting address/range, or PC.
+ * DSP disassemble - arg = starting address/range, or PC.
  */
 int DebugDsp_DisAsm(int nArgc, char *psArgs[])
 {
 	Uint32 lower, upper;
 	Uint16 dsp_disasm_upper = 0;
+	int shown, lines = INT_MAX;
 
 	if (!bDspEnabled)
 	{
@@ -163,17 +172,16 @@ int DebugDsp_DisAsm(int nArgc, char *psArgs[])
 	}
 	if (!dsp_disasm_upper)
 	{
-		int lines = ConfigureParams.Debugger.nDisasmLines;
-		if ( dsp_disasm_addr < (0xFFFF - lines))
-			dsp_disasm_upper = dsp_disasm_addr + lines;
-		else
-			dsp_disasm_upper = 0xFFFF;
+		lines = DebugUI_GetPageLines(ConfigureParams.Debugger.nDisasmLines, 8);
+		dsp_disasm_upper = 0xFFFF;
 	}
-	printf("DSP disasm 0x%hx-0x%hx:\n", dsp_disasm_addr, dsp_disasm_upper);
-	while (dsp_disasm_addr < dsp_disasm_upper) {
-		DebugDsp_ShowAddressInfo(dsp_disasm_addr);
-		dsp_disasm_addr = DSP_DisasmAddress(stderr, dsp_disasm_addr, dsp_disasm_addr);
+	fprintf(debugOutput, "DSP disasm 0x%hx-0x%hx:\n", dsp_disasm_addr, dsp_disasm_upper);
+	for (shown = 1; shown < lines && dsp_disasm_addr < dsp_disasm_upper; shown++) {
+		if (DebugDsp_ShowAddressInfo(dsp_disasm_addr, debugOutput))
+			shown++;
+		dsp_disasm_addr = DSP_DisasmAddress(debugOutput, dsp_disasm_addr, dsp_disasm_addr);
 	}
+	fflush(debugOutput);
 
 	return DEBUGGER_CMDCONT;
 }
@@ -211,7 +219,7 @@ int DebugDsp_MemDump(int nArgc, char *psArgs[])
 				range = psArgs[1] + 2;
 				break;
 			}
-			/* pass-through */
+			/* fall through */
 		default:
 			return DebugUI_PrintCmdHelp(psArgs[0]);
 	}
@@ -258,15 +266,16 @@ int DebugDsp_MemDump(int nArgc, char *psArgs[])
 
 	if (!dsp_memdump_upper)
 	{
-		int lines = ConfigureParams.Debugger.nMemdumpLines;
+		int lines = DebugUI_GetPageLines(ConfigureParams.Debugger.nMemdumpLines, 8);
 		if ( dsp_memdump_addr < (0xFFFF - lines))
 			dsp_memdump_upper = dsp_memdump_addr + lines;
 		else
 			dsp_memdump_upper = 0xFFFF;
 	}
 
-	printf("DSP memdump from 0x%hx in '%c' address space:\n", dsp_memdump_addr, dsp_mem_space);
-	dsp_memdump_addr = DSP_DisasmMemory(dsp_memdump_addr, dsp_memdump_upper, dsp_mem_space);
+	fprintf(debugOutput, "DSP memdump from 0x%hx in '%c' address space:\n", dsp_memdump_addr, dsp_mem_space);
+	dsp_memdump_addr = DSP_DisasmMemory(debugOutput, dsp_memdump_addr, dsp_memdump_upper, dsp_mem_space);
+	fflush(debugOutput);
 
 	return DEBUGGER_CMDCONT;
 }
@@ -314,7 +323,7 @@ static char *DebugDsp_MatchNext(const char *text, int state)
 	static const char* ntypes[] = {
 		"branch", "exreturn", "return", "subcall", "subreturn"
 	};
-	return DebugUI_MatchHelper(ntypes, ARRAYSIZE(ntypes), text, state);
+	return DebugUI_MatchHelper(ntypes, ARRAY_SIZE(ntypes), text, state);
 }
 
 /**
@@ -479,7 +488,7 @@ void DebugDsp_Check(void)
 	}
 	if (LOG_TRACE_LEVEL((TRACE_DSP_DISASM|TRACE_DSP_SYMBOLS)))
 	{
-		DebugDsp_ShowAddressInfo(DSP_GetPC());
+		DebugDsp_ShowAddressInfo(DSP_GetPC(), TraceFile);
 	}
 	if (nDspActiveCBs)
 	{
@@ -514,7 +523,7 @@ void DebugDsp_Check(void)
 void DebugDsp_SetDebugging(void)
 {
 	bDspProfiling = Profile_DspStart();
-	nDspActiveCBs = BreakCond_BreakPointCount(true);
+	nDspActiveCBs = BreakCond_DspBreakPointCount();
 
 	if (nDspActiveCBs || nDspSteps || bDspProfiling || History_TrackDsp()
 	    || LOG_TRACE_LEVEL((TRACE_DSP_DISASM|TRACE_DSP_SYMBOLS)))
@@ -535,7 +544,8 @@ static const dbgcommand_t dspcommands[] =
 	  "set DSP PC address breakpoints",
 	  BreakAddr_Description,
 	  true },
-	{ DebugDsp_BreakCond, BreakCond_MatchDspVariable,
+	/* currently no DSP variables, so checks that DSP symbol addresses */
+	{ DebugDsp_BreakCond, Symbols_MatchDspAddress,
 	  "dspbreak", "db",
 	  "set/remove/list conditional DSP breakpoints",
 	  BreakCond_Description,
@@ -611,7 +621,7 @@ int DebugDsp_Init(const dbgcommand_t **table)
 	dsp_mem_space = 'P';
 
 	*table = dspcommands;
-	return ARRAYSIZE(dspcommands);
+	return ARRAY_SIZE(dspcommands);
 }
 
 /**

@@ -10,11 +10,12 @@
 #ifndef HATARI_NVRAM_H
 #define HATARI_NVRAM_H
 
-/* some constants to give NVRAm locations symbolic names */
+/* some constants to give NVRAM locations symbolic names */
 #define NVRAM_SECONDS	0
 #define NVRAM_MINUTES	2
 #define NVRAM_HOURS	4
-#define NVRAM_DAY	7
+#define NVRAM_WDAY	6
+#define NVRAM_MDAY	7
 #define NVRAM_MONTH	8
 #define NVRAM_YEAR	9
 
@@ -46,5 +47,6 @@ extern void NvRam_Select_ReadByte(void);
 extern void NvRam_Select_WriteByte(void);
 extern void NvRam_Data_ReadByte(void);
 extern void NvRam_Data_WriteByte(void);
+extern void NvRam_Info(FILE *fp, Uint32 dummy);
 
 #endif /* HATARI_NVRAM_H */

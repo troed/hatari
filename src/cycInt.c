@@ -45,13 +45,14 @@
   So, the ratio 8021248 / 2457600 can be expressed as 31333 / 9600
 */
 
-const char CycInt_fileid[] = "Hatari cycInt.c : " __DATE__ " " __TIME__;
+const char CycInt_fileid[] = "Hatari cycInt.c";
 
 #include <stdint.h>
 #include <inttypes.h>
 #include <assert.h>
 
 #include "main.h"
+#include "configuration.h"
 #include "blitter.h"
 #include "dmaSnd.h"
 #include "crossbar.h"
@@ -81,10 +82,14 @@ static void (* const pIntHandlerFunctions[MAX_INTERRUPTS])(void) =
 	Video_InterruptHandler_VBL,
 	Video_InterruptHandler_HBL,
 	Video_InterruptHandler_EndLine,
-	MFP_InterruptHandler_TimerA,
-	MFP_InterruptHandler_TimerB,
-	MFP_InterruptHandler_TimerC,
-	MFP_InterruptHandler_TimerD,
+	MFP_Main_InterruptHandler_TimerA,
+	MFP_Main_InterruptHandler_TimerB,
+	MFP_Main_InterruptHandler_TimerC,
+	MFP_Main_InterruptHandler_TimerD,
+	MFP_TT_InterruptHandler_TimerA,
+	MFP_TT_InterruptHandler_TimerB,
+	MFP_TT_InterruptHandler_TimerC,
+	MFP_TT_InterruptHandler_TimerD,
 	ACIA_InterruptHandler_IKBD,
 	IKBD_InterruptHandler_ResetTimer,
 	IKBD_InterruptHandler_AutoSend,
@@ -196,6 +201,7 @@ void CycInt_MemorySnapShot_Capture(bool bSave)
 		}
 	}
 	MemorySnapShot_Store(&nCyclesOver, sizeof(nCyclesOver));
+	MemorySnapShot_Store(&ActiveInterrupt, sizeof(ActiveInterrupt));
 	MemorySnapShot_Store(&PendingInterruptCount, sizeof(PendingInterruptCount));
 	if (bSave)
 	{
@@ -209,10 +215,6 @@ void CycInt_MemorySnapShot_Capture(bool bSave)
 		MemorySnapShot_Store(&ID, sizeof(int));
 		PendingInterruptFunction = CycInt_IDToHandlerFunction(ID);
 	}
-
-
-	if (!bSave)
-		CycInt_SetNewInterrupt();	/* when restoring snapshot, compute current state after */
 }
 
 
@@ -344,31 +346,6 @@ void CycInt_AddRelativeInterrupt(int CycleTime, int CycleType, interrupt_id Hand
 
 /*-----------------------------------------------------------------------*/
 /**
- * Add interrupt to occur from now without offset
- */
-#if 0
-void CycInt_AddRelativeInterruptNoOffset(int CycleTime, int CycleType, interrupt_id Handler)
-{
-	/* Update list cycle counts before adding a new one, */
-	/* since CycInt_SetNewInterrupt can change the active int / PendingInterruptCount */
-	if ( ( ActiveInterrupt > 0 ) && ( PendingInterruptCount > 0 ) )
-		CycInt_UpdateInterrupt();
-
-//  nCyclesOver = 0;
-	InterruptHandlers[Handler].bUsed = true;
-	InterruptHandlers[Handler].Cycles = INT_CONVERT_TO_INTERNAL((Sint64)CycleTime , CycleType) + PendingInterruptCount;
-
-	/* Set new */
-	CycInt_SetNewInterrupt();
-
-	LOG_TRACE(TRACE_INT, "int add rel no_off video_cyc=%d handler=%d handler_cyc=%"PRId64" pending_count=%d\n",
-	               Cycles_GetCounter(CYCLES_COUNTER_VIDEO), Handler, InterruptHandlers[Handler].Cycles, PendingInterruptCount );
-}
-#endif
-
-
-/*-----------------------------------------------------------------------*/
-/**
  * Add interrupt to occur after CycleTime/CycleType + CycleOffset.
  * CycleOffset can be used to add another delay to the resulting
  * number of internal cycles (should be 0 most of the time, except in
@@ -378,6 +355,7 @@ void CycInt_AddRelativeInterruptNoOffset(int CycleTime, int CycleType, interrupt
  */
 void CycInt_AddRelativeInterruptWithOffset(int CycleTime, int CycleType, interrupt_id Handler, int CycleOffset)
 {
+//fprintf ( stderr , "int add rel %d type %d handler %d offset %d\n" , CycleTime,CycleType,Handler,CycleOffset );
 	assert(CycleTime >= 0);
 
 	/* Update list cycle counts with current PendingInterruptCount before adding a new int, */
@@ -475,6 +453,16 @@ bool CycInt_InterruptActive(interrupt_id Handler)
 		return true;
 
 	return false;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return the number of the active interrupt (0 means no active int)
+ */
+int CycInt_GetActiveInt(void)
+{
+	return ActiveInterrupt;
 }
 
 

@@ -1,14 +1,14 @@
 /*
  * Hatari - profile.c
- * 
- * Copyright (C) 2010-2013 by Eero Tamminen
+ *
+ * Copyright (C) 2010-2019 by Eero Tamminen
  *
  * This file is distributed under the GNU General Public License, version 2
  * or at your option any later version. Read the file gpl.txt for details.
  *
  * profile.c - profile caller info handling and debugger parsing functions
  */
-const char Profile_fileid[] = "Hatari profile.c : " __DATE__ " " __TIME__;
+const char Profile_fileid[] = "Hatari profile.c";
 
 #include <stdio.h>
 #include <assert.h>
@@ -20,9 +20,11 @@ const char Profile_fileid[] = "Hatari profile.c : " __DATE__ " " __TIME__;
 #include "configuration.h"
 #include "clocks_timings.h"
 #include "evaluate.h"
+#include "symbols.h"
 #include "profile.h"
 #include "profile_priv.h"
-#include "symbols.h"
+#include "m68000.h"
+#include "dsp.h"
 
 profile_loop_t profile_loop;
 
@@ -72,9 +74,10 @@ static bool output_counter_info(FILE *fp, counters_t *counter)
 	 */
 	fprintf(fp, " %"PRIu64"/%"PRIu64"/%"PRIu64"",
 		counter->calls, counter->count, counter->cycles);
-	if (counter->misses) {
+	if (counter->i_misses) {
 		/* these are only with specific WinUAE CPU core */
-		fprintf(fp, "/%"PRIu64"", counter->misses);
+		fprintf(fp, "/%"PRIu64"/%"PRIu64"",
+			counter->i_misses, counter->d_hits);
 	}
 	return true;
 }
@@ -90,7 +93,7 @@ static void output_caller_info(FILE *fp, caller_t *info, Uint32 *typeaddr)
 	if (info->flags) {	/* calltypes supported? */
 		fputc(' ', fp);
 		typecount = 0;
-		for (k = 0; k < ARRAYSIZE(flaginfo); k++) {
+		for (k = 0; k < ARRAY_SIZE(flaginfo); k++) {
 			if (info->flags & flaginfo[k].bit) {
 				fputc(flaginfo[k].chr, fp);
 				typecount++;
@@ -110,11 +113,8 @@ static void output_caller_info(FILE *fp, caller_t *info, Uint32 *typeaddr)
 	fputs(", ", fp);
 }
 
-/*
- * Show collected CPU/DSP callee/caller information.
- *
- * Hint: As caller info list is based on number of loaded symbols,
- * load only text symbols to save memory & make things faster...
+/**
+ * Show collected CPU/DSP callee/caller information
  */
 void Profile_ShowCallers(FILE *fp, int sites, callee_t *callsite, const char * (*addr2name)(Uint32, Uint64 *))
 {
@@ -127,10 +127,10 @@ void Profile_ShowCallers(FILE *fp, int sites, callee_t *callsite, const char * (
 	/* legend */
 	fputs("# <callee>: <caller1> = <calls> <types>[ <inclusive/totals>[ <exclusive/totals>]], <caller2> ..., <callee name>", fp);
 	fputs("\n# types: ", fp);
-	for (i = 0; i < ARRAYSIZE(flaginfo); i++) {
+	for (i = 0; i < ARRAY_SIZE(flaginfo); i++) {
 		fprintf(fp, "%c = %s, ", flaginfo[i].chr, flaginfo[i].info);
 	}
-	fputs("\n# totals: calls/instructions/cycles/misses\n", fp);
+	fputs("\n# totals: calls/instructions/cycles/i-misses/d-hits\n", fp);
 
 	countdiff = 0;
 	countissues = 0;
@@ -164,7 +164,7 @@ void Profile_ShowCallers(FILE *fp, int sites, callee_t *callsite, const char * (
 			countissues++;
 		}
 		if (typeaddr) {
-			fprintf(stderr, "WARNING: different types of calls (at least) from 0x%x (to 0x%x),\n\t has its codechanged during profiling?\n",
+			fprintf(stderr, "WARNING: different types of calls (at least) from 0x%x (to 0x%x),\n\t has its code changed during profiling?\n",
 				typeaddr, callsite->addr);
 		}
 	}
@@ -189,7 +189,8 @@ static void add_counter_costs(counters_t *dst, counters_t *src)
 	dst->calls += src->calls;
 	dst->count += src->count;
 	dst->cycles += src->cycles;
-	dst->misses += src->misses;
+	dst->i_misses += src->i_misses;
+	dst->d_hits += src->d_hits;
 }
 
 /**
@@ -200,7 +201,8 @@ static void set_counter_diff(counters_t *dst, counters_t *ref)
 	dst->calls = ref->calls - dst->calls;
 	dst->count = ref->count - dst->count;
 	dst->cycles = ref->cycles - dst->cycles;
-	dst->misses = ref->misses - dst->misses;
+	dst->i_misses = ref->i_misses - dst->i_misses;
+	dst->d_hits = ref->d_hits - dst->d_hits;
 }
 
 /**
@@ -232,11 +234,13 @@ static void add_callee_cost(callee_t *callsite, callstack_t *stack)
 	assert(0);
 }
 
-
+/**
+ * Add new caller or updated earlier caller stats for call site
+ */
 static void add_caller(callee_t *callsite, Uint32 pc, Uint32 prev_pc, calltype_t flag)
 {
+	int i, count, oldcount;
 	caller_t *info;
-	int i, count;
 
 	/* need to store real call addresses as symbols can change
 	 * after profiling has been stopped
@@ -255,21 +259,24 @@ static void add_caller(callee_t *callsite, Uint32 pc, Uint32 prev_pc, calltype_t
 	}
 	/* how many caller slots are currently allocated? */
 	count = callsite->count;
+	oldcount = 0;
 	for (;;) {
-		for (i = 0; i < count; i++, info++) {
+		for (i = oldcount; i < count; i++, info++) {
 			if (info->addr == prev_pc) {
+				/* increment caller */
 				info->flags |= flag;
 				info->calls++;
 				return;
 			}
 			if (!info->addr) {
-				/* empty slot */
+				/* add caller to empty slot */
 				info->addr = prev_pc;
 				info->flags |= flag;
 				info->calls = 1;
 				return;
 			}
 		}
+		oldcount = count;
 		/* not enough, double caller slots */
 		count *= 2;
 		info = realloc(callsite->callers, count * sizeof(*info));
@@ -277,14 +284,15 @@ static void add_caller(callee_t *callsite, Uint32 pc, Uint32 prev_pc, calltype_t
 			fprintf(stderr, "ERROR: caller info alloc failed!\n");
 			return;
 		}
-		memset(info + callsite->count, 0, callsite->count * sizeof(*info));
 		callsite->callers = info;
 		callsite->count = count;
+		info = info + oldcount;
+		memset(info, 0, oldcount * sizeof(*info));
 	}
 }
 
 /**
- * Add information about called symbol, and if it was subroutine
+ * Add information about the called symbol, and if it was a subroutine
  * call, add it to stack of functions which total costs are tracked.
  * callinfo.return_pc needs to be set before invoking this if the call
  * is of type CALL_SUBROUTINE.
@@ -301,8 +309,8 @@ void Profile_CallStart(int idx, callinfo_t *callinfo, Uint32 prev_pc, calltype_t
 
 	add_caller(callinfo->site + idx, pc, prev_pc, flag);
 
-	/* subroutine call which will return? */
-	if (flag != CALL_SUBROUTINE) {
+	/* subroutine/exception call i.e. one which will return? */
+	if (flag != CALL_SUBROUTINE && flag != CALL_EXCEPTION) {
 		/* no, some other call type */
 		return;
 	}
@@ -399,48 +407,142 @@ Uint32 Profile_CallEnd(callinfo_t *callinfo, counters_t *totalcost)
 	return stack->caller_addr;
 }
 
+
 /**
- * Add costs to all functions still in call stack
+ * Add costs to all functions still in call stack and print their names
+ *
+ * Diagram of variables involved in 2 functions deep call stack:
+ *
+ *   (caller_addr 1)  bsr symbol1  -1->  symbol1     (callee_addr 1)
+ *      (ret_addr 1)  <instr>     <-.    ...
+ *                                  |    bsr symbol2 (caller_addr 2)  -2->  symbol2 (callee_addr 2)
+ *                                  1    <instr>     (ret_addr 2)    <-.    ...
+ *                                  |    ...                           2    ... (PC)
+ *                                  '-   rts                           '-   rts
+ *
+ * When one wants to match callee_addr (= symbol) to caller_addr (= which
+ * place in that function called further functions), it's best to traverse
+ * stack from last item to top, as these items are in following call stack
+ * items, not in same one.
  */
-void Profile_FinalizeCalls(callinfo_t *callinfo, counters_t *totalcost, const char* (*get_symbol)(Uint32 addr))
+void Profile_FinalizeCalls(Uint32 pc, callinfo_t *callinfo, counters_t *totalcost,
+			   const char* (*get_symbol)(Uint32, symtype_t),
+			   const char* (*get_caller)(Uint32*))
 {
-	Uint32 addr;
+	const char *sym, *caller;
+	Uint32 sym_addr, caller_addr;
+	int i, lines, offset;
+	bool dots;
+	char sign;
+
 	if (!callinfo->depth) {
 		return;
 	}
 	fprintf(stderr, "Finalizing costs for %d non-returned functions:\n", callinfo->depth);
+
+	i = 0;
+	dots = false;
+	caller_addr = pc;
+	lines = ConfigureParams.Debugger.nBacktraceLines;
 	while (callinfo->depth > 0) {
+
+		/* finalize & decrease callinfo->depth */
 		Profile_CallEnd(callinfo, totalcost);
-		addr = callinfo->stack[callinfo->depth].callee_addr;
-		fprintf(stderr, "- 0x%x: %s (return = 0x%x)\n", addr, get_symbol(addr),
-			callinfo->stack[callinfo->depth].ret_addr);
+		if (++i > lines && lines > 0) {
+			continue;
+		}
+
+		/* Skip showing middle part of a long callstack as messed
+		 * callstacks could be thousands of frames deep...
+		 */
+		if (i >= 32 && callinfo->depth > 32) {
+			if (!dots) {
+				fprintf(stderr, "- ...\n");
+				dots = true;
+			}
+		} else {
+			sym_addr = callinfo->stack[callinfo->depth].callee_addr;
+			sym = get_symbol(sym_addr, SYMTYPE_TEXT);
+
+			if (sym) {
+				offset = caller_addr - sym_addr;
+				sign = offset >= 0 ? '+' : '-';
+				fprintf(stderr, "- %d. 0x%06x: %s %c0x%x",
+					i, caller_addr, sym, sign, abs(offset));
+			} else {
+				fprintf(stderr, "- %d. 0x%06x", i, caller_addr);
+			}
+
+			sym_addr = caller_addr;
+			caller = get_caller(&sym_addr);
+			if (caller && caller != sym) {
+				offset = caller_addr - sym_addr;
+				fprintf(stderr, " (%s +0x%x)\n",
+					caller, abs(offset));
+			} else {
+				fprintf(stderr, "\n");
+			}
+		}
+		caller_addr = callinfo->stack[callinfo->depth].caller_addr;
 	}
 }
 
 /**
- * Show current profile stack
+ * Show current profile call stack, up to configured max backtrace depth
  */
 static void Profile_ShowStack(bool forDsp)
 {
-	int i;
-	Uint32 addr;
+	const char *sym, *caller;
+	const char *(*get_caller)(Uint32*);
+	const char *(*get_symbol)(Uint32, symtype_t);
+	Uint32 sym_addr, caller_addr;
+	int i, offset, depth, top;
 	callinfo_t *callinfo;
-	const char* (*get_symbol)(Uint32 addr);
 
 	if (forDsp) {
-		Profile_DspGetCallinfo(&callinfo, &get_symbol);
+		Profile_DspGetCallinfo(&callinfo, &get_caller, &get_symbol);
+		caller_addr = DSP_GetPC();
 	} else {
-		Profile_CpuGetCallinfo(&callinfo, &get_symbol);
+		Profile_CpuGetCallinfo(&callinfo, &get_caller, &get_symbol);
+		caller_addr = M68000_GetPC();
 	}
 	if (!callinfo->depth) {
 		fprintf(stderr, "Empty stack.\n");
 		return;
 	}
 
-	for (i = 0; i < callinfo->depth; i++) {
-		addr = callinfo->stack[i].callee_addr;
-		fprintf(stderr, "- 0x%x: %s (return = 0x%x)\n", addr,
-			get_symbol(addr), callinfo->stack[i].ret_addr);
+	depth = callinfo->depth;
+	top = ConfigureParams.Debugger.nBacktraceLines;
+	if (top > 0 && top < depth) {
+		top = depth - top;
+	} else {
+		top = 0;
+	}
+	i = 0;
+	while (depth-- > top) {
+		i++;
+		sym_addr = callinfo->stack[depth].callee_addr;
+		offset = caller_addr - sym_addr;
+
+		sym = get_symbol(sym_addr, SYMTYPE_TEXT);
+		if (sym) {
+			char sign = offset >= 0 ? '+' : '-';
+			fprintf(stderr, "- %d. 0x%06x: %s %c0x%x",
+				i, caller_addr, sym, sign, abs(offset));
+		} else {
+			fprintf(stderr, "- %d. 0x%06x", i, caller_addr);
+		}
+
+		sym_addr = caller_addr;
+		caller = get_caller(&sym_addr);
+		if (caller && caller != sym) {
+			offset = caller_addr - sym_addr;
+			fprintf(stderr, " (%s +0x%x)\n",
+				caller, abs(offset));
+		} else {
+			fprintf(stderr, "\n");
+		}
+		caller_addr = callinfo->stack[depth].caller_addr;
 	}
 }
 
@@ -496,10 +598,10 @@ void Profile_FreeCallinfo(callinfo_t *callinfo)
 char *Profile_Match(const char *text, int state)
 {
 	static const char *names[] = {
-		"addresses", "callers", "counts", "cycles", "loops", "misses",
-		"off", "on", "save", "stack", "stats", "symbols"
+		"addresses", "callers", "caches", "counts", "cycles", "d-hits", "i-misses",
+		"loops", "off", "on", "save", "stack", "stats", "symbols"
 	};
-	return DebugUI_MatchHelper(names, ARRAYSIZE(names), text, state);
+	return DebugUI_MatchHelper(names, ARRAY_SIZE(names), text, state);
 }
 
 const char Profile_Description[] =
@@ -510,10 +612,12 @@ const char Profile_Description[] =
 	"\t- off\n"
 	"\t- counts [count]\n"
 	"\t- cycles [count]\n"
-	"\t- misses [count]\n"
+	"\t- i-misses [count]\n"
+	"\t- d-hits [count]\n"
 	"\t- symbols [count]\n"
 	"\t- addresses [address]\n"
 	"\t- callers\n"
+	"\t- caches\n"
 	"\t- stack\n"
 	"\t- stats\n"
 	"\t- save <file>\n"
@@ -524,9 +628,11 @@ const char Profile_Description[] =
 	"\tstatistics ('stats') summary.\n"
 	"\n"
 	"\tThen you can ask for list of the PC addresses, sorted either by\n"
-	"\texecution 'counts', used 'cycles' or cache 'misses'. First can\n"
-	"\tbe limited just to named addresses with 'symbols'.  Optional\n"
-	"\tcount will limit how many items will be shown.\n"
+	"\texecution 'counts', used 'cycles', i-cache misses or d-cache hits.\n"
+	"\tFirst can be limited just to named addresses with 'symbols'.\n"
+	"\tOptional count will limit how many items will be shown.\n"
+	"\n"
+	"\t'caches' shows histogram of CPU cache usage.\n"
 	"\n"
 	"\t'addresses' lists the profiled addresses in order, with the\n"
 	"\tinstructions (currently) residing at them.  By default this\n"
@@ -563,7 +669,7 @@ static bool Profile_Save(const char *fname, bool bForDsp)
 		freq = MachineClocks.DSP_Freq;
 		proc = "DSP";
 	} else {
-		freq = MachineClocks.CPU_Freq;
+		freq = MachineClocks.CPU_Freq_Emul;
 		proc = "CPU";
 	}
 #if ENABLE_WINUAE_CPU
@@ -636,6 +742,8 @@ static bool Profile_Loops(int nArgc, char *psArgs[])
 			profile_loop.filename = NULL;
 			fclose(profile_loop.fp);
 			profile_loop.fp = NULL;
+		} else {
+			fprintf(stderr, "ERROR: no file name for saving the loop profiling information.\n");
 		}
 	}
 	return true;
@@ -671,9 +779,9 @@ int Profile_Command(int nArgc, char *psArgs[], bool bForDsp)
 			lower = *disasm_addr;
 		}
 		if (bForDsp) {
-			*disasm_addr = Profile_DspShowAddresses(lower, upper, stdout);
+			*disasm_addr = Profile_DspShowAddresses(lower, upper, stdout, PAGING_ENABLED);
 		} else {
-			*disasm_addr = Profile_CpuShowAddresses(lower, upper, stdout);
+			*disasm_addr = Profile_CpuShowAddresses(lower, upper, stdout, PAGING_ENABLED);
 		}
 		return DEBUGGER_CMDCONT;
 
@@ -684,18 +792,30 @@ int Profile_Command(int nArgc, char *psArgs[], bool bForDsp)
 	} else if (strcmp(psArgs[1], "off") == 0) {
 		*enabled = false;
 		fprintf(stderr, "Profiling disabled.\n");
-	
+
 	} else if (strcmp(psArgs[1], "stats") == 0) {
 		if (bForDsp) {
 			Profile_DspShowStats();
 		} else {
 			Profile_CpuShowStats();
 		}
-	} else if (strcmp(psArgs[1], "misses") == 0) {
+	} else if (strcmp(psArgs[1], "i-misses") == 0) {
 		if (bForDsp) {
-			fprintf(stderr, "Cache misses are recorded only for CPU, not DSP.\n");
+			fprintf(stderr, "Cache information is recorded only for CPU, not DSP.\n");
 		} else {
-			Profile_CpuShowMisses(show);
+			Profile_CpuShowInstrMisses(show);
+		}
+	} else if (strcmp(psArgs[1], "d-hits") == 0) {
+		if (bForDsp) {
+			fprintf(stderr, "Cache information is recorded only for CPU, not DSP.\n");
+		} else {
+			Profile_CpuShowDataHits(show);
+		}
+	} else if (strcmp(psArgs[1], "caches") == 0) {
+		if (bForDsp) {
+			fprintf(stderr, "Cache information is recorded only for CPU, not DSP.\n");
+		} else {
+			Profile_CpuShowCaches();
 		}
 	} else if (strcmp(psArgs[1], "cycles") == 0) {
 		if (bForDsp) {

@@ -8,26 +8,17 @@
 
   This is similar to the printing functions, we open a direct file
   (e.g. /dev/ttyS0) and send bytes over it.
-  Using such method mimicks the ST exactly, and even allows us to connect
+  Using such method mimics the ST exactly, and even allows us to connect
   to an actual ST! To wait for incoming data, we create a thread which copies
   the bytes into an input buffer. This method fits in with the internet code
   which also reads data into a buffer.
 */
-const char RS232_fileid[] = "Hatari rs232.c : " __DATE__ " " __TIME__;
+const char RS232_fileid[] = "Hatari rs232.c";
 
-#include <config.h>
-
-#if HAVE_TERMIOS_H
-# include <termios.h>
-# include <unistd.h>
-#endif
-#if defined(WIIU) || defined(VITA)
-//no rs323 for now
-#else
 #include <SDL.h>
 #include <SDL_thread.h>
 #include <errno.h>
-#endif
+
 #include "main.h"
 #include "configuration.h"
 #include "ioMem.h"
@@ -35,6 +26,15 @@ const char RS232_fileid[] = "Hatari rs232.c : " __DATE__ " " __TIME__;
 #include "mfp.h"
 #include "rs232.h"
 
+/* AmigaOS has termios.h, but no tcsetattr() and friends - d'oh! */
+#if !defined(HAVE_TCSETATTR)
+#undef HAVE_TERMIOS_H
+#endif
+
+#if HAVE_TERMIOS_H
+# include <termios.h>
+# include <unistd.h>
+#endif
 
 #define RS232_DEBUG 0
 
@@ -47,6 +47,8 @@ const char RS232_fileid[] = "Hatari rs232.c : " __DATE__ " " __TIME__;
 
 static FILE *hComIn = NULL;        /* Handle to file for reading */
 static FILE *hComOut = NULL;       /* Handle to file for writing */
+
+#define  MAX_RS232INPUT_BUFFER    2048  /* Must be ^2 */
 
 static unsigned char InputBuffer_RS232[MAX_RS232INPUT_BUFFER];
 static int InputBuffer_Head=0, InputBuffer_Tail=0;
@@ -64,39 +66,6 @@ static inline void cfmakeraw(struct termios *termios_p)
 	termios_p->c_cflag |= CS8;
 }
 #endif
-
-
-#if defined(__AMIGAOS4__)
-
-// dummy functions. REMOVE THEM LATER
-
-int tcgetattr(int file_descriptor,struct termios *tios_p)
-{
-	return -1;
-}
-
-int tcsetattr(int file_descriptor,int action,struct termios *tios_p)
-{
-	return -1;
-}
-
-int cfsetospeed(struct termios *tios, speed_t ospeed)
-{
-
-	tios->c_ospeed = ospeed;
-
-	return 0;
-}
-
-
-int cfsetispeed(struct termios *tios,speed_t ispeed)
-{
-	tios->c_ispeed = ispeed;
-
-	return 0;
-}
-
-#endif  /* __AMIGAOS4__ */
 
 
 /*-----------------------------------------------------------------------*/
@@ -258,25 +227,30 @@ static bool RS232_OpenCOMPort(void)
  */
 static void RS232_CloseCOMPort(void)
 {
-	if (hComIn)
-	{
-		/* Close */
-		fclose(hComIn);
-		hComIn = NULL;
-	}
+	/* Write side needs to be closed first.  Otherwise Hatari
+	 * instances at both ends of a "RS-232" FIFO file would freeze
+	 * when Hatari exists or RS-232 configuration is changed
+	 * (with this, only one of them freezes until other
+	 * end of a FIFO also closes the "device" file(s)).
+	 */
 	if (hComOut)
 	{
 		fclose(hComOut);
 		hComOut = NULL;
 	}
+	if (hComIn)
+	{
+		fclose(hComIn);
+		hComIn = NULL;
+	}
 	Dprintf(("Closed RS232 files.\n"));
 }
 
-#if !defined(WIIU) && !defined(VITA)
+
 /* thread stuff */
 static SDL_sem* pSemFreeBuf;       /* Semaphore to sync free space in InputBuffer_RS232 */
 static SDL_Thread *RS232Thread = NULL; /* Thread handle for reading incoming data */
-#endif
+
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -285,7 +259,7 @@ static SDL_Thread *RS232Thread = NULL; /* Thread handle for reading incoming dat
 static void RS232_AddBytesToInputBuffer(unsigned char *pBytes, int nBytes)
 {
 	int i;
-#if !defined(WIIU) && !defined(VITA)
+
 	/* Copy bytes into input buffer */
 	for (i=0; i<nBytes; i++)
 	{
@@ -293,7 +267,6 @@ static void RS232_AddBytesToInputBuffer(unsigned char *pBytes, int nBytes)
 		InputBuffer_RS232[InputBuffer_Tail] = *pBytes++;
 		InputBuffer_Tail = (InputBuffer_Tail+1) % MAX_RS232INPUT_BUFFER;
 	}
-#endif
 }
 
 
@@ -305,7 +278,7 @@ static int RS232_ThreadFunc(void *pData)
 {
 	int iInChar;
 	unsigned char cInChar;
-#if !defined(WIIU) && !defined(VITA)
+
 	/* Check for any RS-232 incoming data */
 	while (!bQuitThread)
 	{
@@ -319,7 +292,7 @@ static int RS232_ThreadFunc(void *pData)
 				cInChar = iInChar;
 				RS232_AddBytesToInputBuffer(&cInChar, 1);
 				/* FIXME: Use semaphores to lock MFP variables? */
-				MFP_InputOnChannel ( MFP_INT_RCV_BUF_FULL , 0 );
+				MFP_InputOnChannel ( pMFP_Main , MFP_INT_RCV_BUF_FULL , 0 );
 				Dprintf(("RS232: Read character $%x\n", iInChar));
 				/* Sleep for a while */
 				SDL_Delay(2);
@@ -338,7 +311,7 @@ static int RS232_ThreadFunc(void *pData)
 			SDL_Delay(200);
 		}
 	}
-#endif
+
 	return true;
 }
 
@@ -351,7 +324,6 @@ static int RS232_ThreadFunc(void *pData)
  */
 void RS232_Init(void)
 {
-#if !defined(WIIU) && !defined(VITA)
 	if (ConfigureParams.RS232.bEnableRS232)
 	{
 		if (!RS232_OpenCOMPort())
@@ -366,7 +338,7 @@ void RS232_Init(void)
 	{
 		/* Create semaphore */
 		if (pSemFreeBuf == NULL)
-			pSemFreeBuf = SDL_CreateSemaphore(MAX_RS232INPUT_BUFFER);
+			pSemFreeBuf = SDL_CreateSemaphore(MAX_RS232INPUT_BUFFER - 1);
 		if (pSemFreeBuf == NULL)
 		{
 			RS232_CloseCOMPort();
@@ -386,10 +358,6 @@ void RS232_Init(void)
 			Dprintf(("RS232 thread has been created.\n"));
 		}
 	}
-#else
-	ConfigureParams.RS232.bEnableRS232 = false;
-	return;
-#endif
 }
 
 
@@ -399,7 +367,6 @@ void RS232_Init(void)
  */
 void RS232_UnInit(void)
 {
-#if !defined(WIIU) && !defined(VITA)
 	/* Close, kill thread and free resource */
 	if (RS232Thread)
 	{
@@ -423,7 +390,6 @@ void RS232_UnInit(void)
 		SDL_DestroySemaphore(pSemFreeBuf);
 		pSemFreeBuf = NULL;
 	}
-#endif
 }
 
 
@@ -447,7 +413,7 @@ void RS232_UnInit(void)
  *     1 1 : 5 Bits
  *   Bit 7: Frequency from TC and RC
  */
-void RS232_HandleUCR(Sint16 ucr)
+static void RS232_HandleUCR(Sint16 ucr)
 {
 #if HAVE_TERMIOS_H
 	int nCharSize;                   /* Bits per character: 5, 6, 7 or 8 */
@@ -478,7 +444,7 @@ void RS232_HandleUCR(Sint16 ucr)
 /**
  * Set baud rate configuration of RS-232.
  */
-bool RS232_SetBaudRate(int nBaud)
+static bool RS232_SetBaudRate(int nBaud)
 {
 #if HAVE_TERMIOS_H
 	int i;
@@ -529,7 +495,7 @@ bool RS232_SetBaudRate(int nBaud)
 		return false;
 	}
 
-	/* Set ouput speed: */
+	/* Set output speed: */
 	if (hComOut != NULL)
 	{
 		memset (&termmode, 0, sizeof(termmode));    /* Init with zeroes */
@@ -617,25 +583,12 @@ void RS232_SetBaudRateFromTimerD(void)
 }
 
 
-/*-----------------------------------------------------------------------*/
-/**
- * Set flow control configuration of RS-232.
- */
-void RS232_SetFlowControl(Sint16 ctrl)
-{
-	Dprintf(("RS232_SetFlowControl(%i)\n", ctrl));
-
-	/* Not yet written */
-}
-
-
 /*----------------------------------------------------------------------- */
 /**
  * Pass bytes from emulator to RS-232
  */
-bool RS232_TransferBytesTo(Uint8 *pBytes, int nBytes)
+static bool RS232_TransferBytesTo(Uint8 *pBytes, int nBytes)
 {
-#if !defined(WIIU) && !defined(VITA)
 	/* Make sure there's a RS-232 connection if it's enabled */
 	if (ConfigureParams.RS232.bEnableRS232)
 		RS232_OpenCOMPort();
@@ -647,12 +600,12 @@ bool RS232_TransferBytesTo(Uint8 *pBytes, int nBytes)
 		if (fwrite(pBytes, 1, nBytes, hComOut))
 		{
 			Dprintf(("RS232: Sent %i bytes ($%x ...)\n", nBytes, *pBytes));
-			MFP_InputOnChannel ( MFP_INT_TRN_BUF_EMPTY , 0 );
+			MFP_InputOnChannel ( pMFP_Main , MFP_INT_TRN_BUF_EMPTY , 0 );
 
 			return true;   /* OK */
 		}
 	}
-#endif
+
 	return false;  /* Failed */
 }
 
@@ -661,10 +614,10 @@ bool RS232_TransferBytesTo(Uint8 *pBytes, int nBytes)
 /**
  * Read characters from our internal input buffer (bytes from other machine)
  */
-bool RS232_ReadBytes(Uint8 *pBytes, int nBytes)
+static bool RS232_ReadBytes(Uint8 *pBytes, int nBytes)
 {
 	int i;
-#if !defined(WIIU) && !defined(VITA)
+
 	/* Connected? */
 	if (hComIn && InputBuffer_Head != InputBuffer_Tail)
 	{
@@ -677,7 +630,7 @@ bool RS232_ReadBytes(Uint8 *pBytes, int nBytes)
 		}
 		return true;
 	}
-#endif
+
 	return false;
 }
 
@@ -686,9 +639,8 @@ bool RS232_ReadBytes(Uint8 *pBytes, int nBytes)
 /**
  * Return true if bytes waiting!
  */
-bool RS232_GetStatus(void)
+static bool RS232_GetStatus(void)
 {
-#if !defined(WIIU) && !defined(VITA)
 	/* Connected? */
 	if (hComIn)
 	{
@@ -696,7 +648,7 @@ bool RS232_GetStatus(void)
 		if (InputBuffer_Head != InputBuffer_Tail)
 			return true;
 	}
-#endif
+
 	/* No, none */
 	return false;
 }
@@ -704,7 +656,7 @@ bool RS232_GetStatus(void)
 
 /*-----------------------------------------------------------------------*/
 /**
- * Read from the Syncronous Character Register.
+ * Read from the Synchronous Character Register.
  */
 void RS232_SCR_ReadByte(void)
 {
@@ -715,7 +667,7 @@ void RS232_SCR_ReadByte(void)
 
 /*-----------------------------------------------------------------------*/
 /**
- * Write to the Syncronous Character Register.
+ * Write to the Synchronous Character Register.
  */
 void RS232_SCR_WriteByte(void)
 {
@@ -783,7 +735,7 @@ void RS232_RSR_WriteByte(void)
  * Read from the Transmitter Status Register.
  * When RS232 emulation is not enabled, we still return 0x80 to allow
  * some games to work when they don't require send/receive on the RS232 port
- * (eg : 'Treasure Trap', 'The Deep' write some debug informations to RS232)
+ * (eg : 'Treasure Trap', 'The Deep' write some debug information to RS232)
  */
 void RS232_TSR_ReadByte(void)
 {
@@ -823,7 +775,7 @@ void RS232_UDR_ReadByte(void)
 	if (RS232_GetStatus())              /* More data waiting? */
 	{
 		/* Yes, generate another interrupt. */
-		MFP_InputOnChannel ( MFP_INT_RCV_BUF_FULL , 0 );
+		MFP_InputOnChannel ( pMFP_Main , MFP_INT_RCV_BUF_FULL , 0 );
 	}
 }
 

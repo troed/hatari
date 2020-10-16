@@ -45,6 +45,25 @@
 #define	FDC_IRQ_SOURCE_OTHER			(1<<4)		/* IRQ set by other parts (IPF) */
 
 
+/* Option bits in the command register */
+#define	FDC_COMMAND_BIT_VERIFY			(1<<2)		/* 0=no verify after type I, 1=verify after type I */
+#define	FDC_COMMAND_BIT_HEAD_LOAD		(1<<2)		/* for type II/III 0=no extra delay, 1=add 30 ms delay to set the head */
+#define	FDC_COMMAND_BIT_SPIN_UP			(1<<3)		/* 0=enable motor's spin up, 1=disable motor's spin up */
+#define	FDC_COMMAND_BIT_UPDATE_TRACK		(1<<4)		/* 0=don't update TR after type I, 1=update TR after type I */
+#define	FDC_COMMAND_BIT_MULTIPLE_SECTOR		(1<<4)		/* 0=read/write only 1 sector, 1=read/write many sectors */
+
+
+#define	FDC_INTERRUPT_COND_IP			(1<<2)		/* Force interrupt on Index Pulse */
+#define	FDC_INTERRUPT_COND_IMMEDIATE		(1<<3)		/* Force interrupt immediate */
+
+
+#define	FDC_DC_SIGNAL_EJECTED			0
+#define	FDC_DC_SIGNAL_INSERTED			1
+
+
+extern int	FDC_StepRate_ms[];
+
+
 extern void	FDC_MemorySnapShot_Capture ( bool bSave );
 extern void	FDC_Init ( void );
 extern void	FDC_Reset ( bool bCold );
@@ -52,6 +71,7 @@ extern void	FDC_SetDMAStatus ( bool bError );
 
 extern void	FDC_SetIRQ ( Uint8 IRQ_Source );
 extern void	FDC_ClearIRQ ( void );
+extern void	FDC_ClearHdcIRQ(void);
 extern void	FDC_InterruptHandler_Update ( void );
 
 extern void	FDC_Drive_Set_BusyLed ( Uint8 SR );
@@ -61,7 +81,9 @@ extern void	FDC_Drive_Set_NumberOfHeads ( int Drive , int NbrHeads );
 extern void	FDC_InsertFloppy ( int Drive );
 extern void	FDC_EjectFloppy ( int Drive );
 extern void	FDC_SetDriveSide ( Uint8 io_porta_old , Uint8 io_porta_new );
-extern int	FDC_GetBytesPerTrack ( int Drive );
+extern int	FDC_GetBytesPerTrack ( Uint8 Drive , Uint8 Track , Uint8 Side );
+extern int	FDC_GetFloppyDensity ( Uint8 Drive );
+extern int	FDC_MachineHandleDensity ( Uint8 Drive );
 
 extern int	FDC_IndexPulse_GetCurrentPos_FdcCycles ( Uint32 *pFdcCyclesPerRev );
 extern int	FDC_IndexPulse_GetCurrentPos_NbBytes ( void );
@@ -75,8 +97,10 @@ extern void	FDC_DiskControllerStatus_ReadWord ( void );
 extern void	FDC_DmaModeControl_WriteWord ( void );
 extern void	FDC_DmaStatus_ReadWord ( void );
 extern int	FDC_DMA_GetModeControl_R_WR ( void );
+extern int	FDC_DMA_GetMode(void);
 extern void	FDC_DMA_FIFO_Push ( Uint8 Byte );
 extern Uint8	FDC_DMA_FIFO_Pull ( void );
+extern int	FDC_DMA_GetSectorCount ( void );
 
 extern void	FDC_Buffer_Reset ( void );
 extern void	FDC_Buffer_Add_Timing ( Uint8 Byte , Uint16 Timing );
@@ -91,7 +115,7 @@ extern void	FDC_DmaAddress_WriteByte ( void );
 extern Uint32	FDC_GetDMAAddress ( void );
 extern void	FDC_WriteDMAAddress ( Uint32 Address );
 
-extern void	FDC_FloppyMode_ReadByte ( void );
-extern void	FDC_FloppyMode_WriteByte ( void );
+extern void	FDC_DensityMode_WriteWord ( void );
+extern void	FDC_DensityMode_ReadWord ( void );
 
 #endif /* ifndef HATARI_FDC_H */

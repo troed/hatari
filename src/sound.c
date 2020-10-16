@@ -28,6 +28,56 @@
   the same sound output as when per==1.
 
 
+  NOTE [NP] : As of June 2017, Hatari uses a completely new/rewritten cycle exact YM2149 emulation.
+
+  Instead of updating YM2149's state on every host call (for example at 44.1 kHz), YM2149's state is now updated
+  at 250 kHz (which is the base frequency used by real YM2149 to handle its various counters) and
+  then downsampled to the host frequency.
+  This is required to perfectly emulate transitions when the periods for tone/noise/envelope
+  are changed and whether a new phase should be started or the current phase should be extended.
+
+  Using a custom program on a real STF, it's possible to change YM2149 registers at very precise
+  cycles during various sound phases and to record the STF sound output as a wav file on a modern PC.
+  The wav file can then be studied (using Audacity for example) to precisely see how and when
+  a change in a register affects the sound output.
+
+  Based on these measures I made, the following behaviours of the YM2149 were confirmed :
+
+    - unlike what it written in Yamaha documentation, each period counter doesn't count
+      from 'period' down to 0, but count up from 0 until the counter reaches 'period'.
+      The counter is incremented at 250 kHz, with the following pseudo code :
+
+         tone_counter = tone_counter+1
+         if ( tone_counter >= tone_period )
+           tone_counter = 0
+           invert tone output
+
+      This means that when a new value is written in tone period A for example, the current phase
+      will be either extended (if new_period_A > tone_counter_A) or a new phase will be
+      started immediately (if new_period_A < tone_counter_A).
+
+    - noise counter is incremented twice slower than tone counter ; for example with period=31
+      a tone phase will remain up or down for ~0.0001 sec, but a noise phase will remain up or down
+      for ~0.0002 sec. This is equivalent to incrementing noise counter at 125 kHz instead
+      of 250 kHz like tone counter.
+
+    - it is known that when writing to the env wave register (reg 13) the current envelope
+      is restarted from the start (this is often used in so called sync-buzzer effects).
+      But the measures on the resulting wav file of the YM2149 also show that the current
+      envelope phase is restarted at the same time that envelope wave register is written to.
+
+    - The various counters for tone/noise/env all give the same result when period=1 and when period=0.
+      For noise and envelope, this can be seen when sampling the sound output as above
+      For tone, this was also measured using a logic analyser (to sample at much higher rate than 250 kHz)
+
+    - 2 voices playing tones at the same frequency and at the same volume can cancel each other partially
+      or completely, giving no sound output at all.
+      This happens when the phase for one voice is "up" while the phase for the other voice
+      is "down", then on the next phase inversion, 1st voice will be "down" and 2nd voice will be "up".
+      In such cases, the sum of these 2 tone waveforms will give a constant output signal, producing no sound at all.
+      If both voices are not fully in opposite phase, the resulting sound will vary depending
+      on how much phases are in common and how much they "cancel" each other
+
 */
 
 /* 2008/05/05	[NP]	Fix case where period is 0 for noise, sound or envelope.	*/
@@ -68,16 +118,18 @@
 /*			Sound_MemorySnapShot_Capture.					*/
 /* 2008/11/23	[NP]	Clean source, remove old sound core.				*/
 /* 2011/11/03	[DS]	Stereo DC filtering which accounts for DMA sound.               */
+/* 2017/06/xx	[NP]	New cycle exact emulation method, all counters are incremented	*/
+/*			using a simulated freq of 250 kHz. Some undocumented cases	*/
+/*			where also measured on real STF to improve accuracy.		*/
+/* 2019/09/09	[NP]	Add YM2149_Next_Resample_Weighted_Average_N for better		*/
+/*			downsampling of the internal 250 kHz sound buffer.		*/
 
-
-
-const char Sound_fileid[] = "Hatari sound.c : " __DATE__ " " __TIME__;
-
-#include <SDL_types.h>
+const char Sound_fileid[] = "Hatari sound.c";
 
 #include "main.h"
 #include "audio.h"
 #include "cycles.h"
+#include "m68000.h"
 #include "configuration.h"
 #include "dmaSnd.h"
 #include "crossbar.h"
@@ -169,14 +221,15 @@ static yms16 *ymout5 = (yms16 *)ymout5_u16;
 /*--------------------------------------------------------------*/
 
 /* Number of generated samples per frame (eg. 44Khz=882) */
-#define SAMPLES_PER_FRAME  (nAudioFrequency/nScreenRefreshRate)
+#define SAMPLES_PER_FRAME	(nAudioFrequency/nScreenRefreshRate)
 
 /* Current sound replay freq (usually 44100 Hz) */
-#define YM_REPLAY_FREQ   nAudioFrequency
+#define YM_REPLAY_FREQ		nAudioFrequency
 
-/* YM-2149 clock on all Atari models is 2 MHz */
+/* YM-2149 clock on all Atari models is 2 MHz (CPU freq / 4) */
+/* Period counters for tone/noise/env are based on YM clock / 8 = 250 kHz */
 #define YM_ATARI_CLOCK		(MachineClocks.YM_Freq)
-
+#define YM_ATARI_CLOCK_COUNTER	(YM_ATARI_CLOCK / 8)
 
 /* Merge/read the 3 volumes in a single integer (5 bits per volume) */
 #define	YM_MERGE_VOICE(C,B,A)	( (C)<<10 | (B)<<5 | A )
@@ -197,6 +250,24 @@ static yms16 *ymout5 = (yms16 *)ymout5_u16;
 /* restored in memory snapshots)				*/
 /*--------------------------------------------------------------*/
 
+#define YM_250						/* runs at 250 kHz with low quality downsample at YM_REPLAY_FREQ */
+#define YM_250_MORE					/* runs at 250 kHz with more accurate downsample at YM_REPLAY_FREQ using YM2149_Resample_Method */
+//#define YM_250_DEBUG					/* write raw 250 kHz samples to a file 'hatari_250.wav' */
+
+
+/* For our internal computations to convert down/up square wave signals into 0-31 volume, */
+/* we consider that 'up' is 31 and 'down' is 0 */
+#define	YM_SQUARE_UP		0x1f
+#define	YM_SQUARE_DOWN		0x00
+
+static ymu16	ToneA_per , ToneA_count , ToneA_val , ToneA_force;
+static ymu16	ToneB_per , ToneB_count , ToneB_val , ToneB_force;
+static ymu16	ToneC_per , ToneC_count , ToneC_val , ToneC_force;
+static ymu16	Noise_per , Noise_count , Noise_val;
+static ymu16	Env_per , Env_count;
+
+static ymu32	YM_Clock_Step;
+
 static ymu32	stepA , stepB , stepC;
 static ymu32	posA , posB , posC;
 static ymu32	mixerTA , mixerTB , mixerTC;
@@ -208,8 +279,8 @@ static ymu32	currentNoise;
 static ymu32	RndRack;				/* current random seed */
 
 static ymu32	envStep;
-static ymu32	envPos;
-static int	envShape;
+static ymu32	Env_pos;
+static int	Env_shape;
 
 static ymu16	EnvMask3Voices = 0;			/* mask is 0x1f for voices having an active envelope */
 static ymu16	Vol3Voices = 0;				/* volume 0-0x1f for voices having a constant volume */
@@ -220,7 +291,16 @@ static ymu16	Vol3Voices = 0;				/* volume 0-0x1f for voices having a constant vo
 Uint8		SoundRegs[ 14 ];
 
 int		YmVolumeMixing = YM_TABLE_MIXING;
-bool		UseLowPassFilter = false;
+
+int		YM2149_LPF_Filter = YM2149_LPF_FILTER_PWM;
+// int		YM2149_LPF_Filter = YM2149_LPF_FILTER_NONE;	/* For debug */
+int		YM2149_HPF_Filter = YM2149_HPF_FILTER_IIR;
+// int		YM2149_HPF_Filter = YM2149_HPF_FILTER_NONE;	/* For debug */
+
+//int		YM2149_Resample_Method = YM2149_RESAMPLE_METHOD_NEAREST;
+//int		YM2149_Resample_Method = YM2149_RESAMPLE_METHOD_WEIGHTED_AVERAGE_2;
+int		YM2149_Resample_Method = YM2149_RESAMPLE_METHOD_WEIGHTED_AVERAGE_N;
+
 
 bool		bEnvelopeFreqFlag;			/* Cleared each frame for YM saving */
 
@@ -234,6 +314,19 @@ static int 	SamplesPerFrame;			/* Number of samples to generate for the current 
 static int	CurrentSamplesNb = 0;			/* Number of samples already generated for the current VBL */
 
 bool		Sound_BufferIndexNeedReset = false;
+
+
+#ifdef YM_250_MORE
+#define		YM_BUFFER_250_SIZE	( MIXBUFFER_SIZE * 8 )	/* Size to store samples generated at 250 kHz (must be a power of 2) */
+							/* As we usually output at 44.1 or 48 kHz using MIXBUFFER_SIZE, having */
+							/* a buffer x8 is nearly equivalent when generating at 250 kHz */
+ymsample	YM_Buffer_250[ YM_BUFFER_250_SIZE ];
+static int	YM_Buffer_250_pos_write = 0;		/* Current writing position into above buffer */
+static int	YM_Buffer_250_pos_read = 0;		/* Current reading position into above buffer */
+
+static int	SamplesToGenerate_250;
+
+#endif
 
 
 /*--------------------------------------------------------------*/
@@ -258,7 +351,10 @@ static ymu32	YM2149_RndCompute	(void);
 static ymu32	Ym2149_ToneStepCompute	(ymu8 rHigh , ymu8 rLow);
 static ymu32	Ym2149_NoiseStepCompute	(ymu8 rNoise);
 static ymu32	Ym2149_EnvStepCompute	(ymu8 rHigh , ymu8 rLow);
-static ymsample	YM2149_NextSample	(void);
+static ymu16	YM2149_TonePer		(ymu8 rHigh , ymu8 rLow , ymu16 *pTone_force);
+static ymu16	YM2149_NoisePer		(ymu8 rNoise);
+static ymu16	YM2149_EnvPer		(ymu8 rHigh , ymu8 rLow);
+static void	YM2149_TonePerFilter	(ymu16 per , ymu16 *pTone_force);
 
 static int	Sound_SetSamplesPassed(bool FillFrame);
 static void	Sound_GenerateSamples(int SamplesToGenerate);
@@ -279,6 +375,9 @@ ymsample	Subsonic_IIR_HPF_Left(ymsample x0)
 {
 	static	yms32	x1 = 0, y1 = 0, y0 = 0;
 
+	if ( YM2149_HPF_Filter == YM2149_HPF_FILTER_NONE )
+		return x0;
+
 	y1 += ((x0 - x1)<<15) - (y0<<6);  /*  64*y0  */
 	y0 = y1>>15;
 	x1 = x0;
@@ -290,6 +389,9 @@ ymsample	Subsonic_IIR_HPF_Left(ymsample x0)
 ymsample	Subsonic_IIR_HPF_Right(ymsample x0)
 {
 	static	yms32	x1 = 0, y1 = 0, y0 = 0;
+
+	if ( YM2149_HPF_Filter == YM2149_HPF_FILTER_NONE )
+		return x0;
 
 	y1 += ((x0 - x1)<<15) - (y0<<6);  /*  64*y0  */
 	y0 = y1>>15;
@@ -668,8 +770,7 @@ static void	Ym2149_BuildVolumeTable(void)
 
 	/* Normalise/center the values (convert from u16 to s16) */
 	/* On STE/TT, we use YM_OUTPUT_LEVEL>>1 to avoid overflow with DMA sound */
-	if ( (ConfigureParams.System.nMachineType == MACHINE_STE) || (ConfigureParams.System.nMachineType == MACHINE_MEGA_STE)
-		|| (ConfigureParams.System.nMachineType == MACHINE_TT) )
+	if (Config_IsMachineSTE() || Config_IsMachineTT())
 		YM2149_Normalise_5bit_Table ( ymout5_u16[0][0] , ymout5 , (YM_OUTPUT_LEVEL>>1) , YM_OUTPUT_CENTERED );
 	else
 		YM2149_Normalise_5bit_Table ( ymout5_u16[0][0] , ymout5 , YM_OUTPUT_LEVEL , YM_OUTPUT_CENTERED );
@@ -711,16 +812,34 @@ static void	Ym2149_Reset(void)
 
 	Sound_WriteReg ( 7 , 0xff );
 
+	/* Reset internal variables and counters */
+	ToneA_per = ToneA_count = 0;
+	ToneB_per = ToneB_count = 0;
+	ToneC_per = ToneC_count = 0;
+	Noise_per = Noise_count = 0;
+	Env_per = Env_count = 0;
+
+	ToneA_val = ToneB_val = ToneC_val = Noise_val = YM_SQUARE_DOWN;
+	ToneA_force = ToneB_force = ToneC_force = 0;
+
+	YM2149_TonePerFilter ( ToneA_per , &ToneA_force );
+	YM2149_TonePerFilter ( ToneB_per , &ToneB_force );
+	YM2149_TonePerFilter ( ToneC_per , &ToneC_force );
+
+	YM_Clock_Step = 0;
+
+	RndRack = 1;
+
+	/* old code */
+
 	posA = 0;
 	posB = 0;
 	posC = 0;
 
 	currentNoise = 0xffff;
 
-	RndRack = 1;
-
-	envShape = 0;
-	envPos = 0;
+	Env_shape = 0;
+	Env_pos = 0;
 }
 
 
@@ -761,8 +880,6 @@ static ymu32	YM2149_RndCompute(void)
  * render possible tone's freq of 125 or 62.5 kHz (when per==1 or per==2)
  */
 
-#define NEWSTEP
-#ifndef NEWSTEP
 static ymu32	Ym2149_ToneStepCompute(ymu8 rHigh , ymu8 rLow)
 {
 	int	per;
@@ -771,25 +888,7 @@ static ymu32	Ym2149_ToneStepCompute(ymu8 rHigh , ymu8 rLow)
 	per = rHigh&15;
 	per = (per<<8)+rLow;
 
-	if  (per <= (int)(YM_ATARI_CLOCK/(YM_REPLAY_FREQ*7)) )
-		return 0;
-
-	step = YM_ATARI_CLOCK;
-	step <<= (15+16-3);
-	step /= (per * YM_REPLAY_FREQ);
-
-	return step;
-}
-#else
-static ymu32	Ym2149_ToneStepCompute(ymu8 rHigh , ymu8 rLow)
-{
-	int	per;
-	yms64	step;
-
-	per = rHigh&15;
-	per = (per<<8)+rLow;
-
-#if 0							/* need some high freq filters for this to work correctly */
+#if 1							/* need some high freq filters for this to work correctly */
 	if ( per == 0 )
 		per = 1;				/* result for Per=0 is the same as for Per=1 */	
 #else
@@ -804,7 +903,37 @@ static ymu32	Ym2149_ToneStepCompute(ymu8 rHigh , ymu8 rLow)
 
 	return step;
 }
-#endif
+
+
+static ymu16	YM2149_TonePer(ymu8 rHigh , ymu8 rLow , ymu16 *pTone_force)
+{
+	ymu16	per;
+
+	per = ( ( rHigh & 0x0f ) << 8 ) + rLow;
+	YM2149_TonePerFilter ( per , pTone_force );
+	return per;
+}
+
+
+static ymu16	YM2149_NoisePer(ymu8 rNoise)
+{
+	ymu16	per;
+
+	per = rNoise & 0x1f;
+	return per;
+}
+
+
+static ymu16	YM2149_EnvPer(ymu8 rHigh , ymu8 rLow)
+{
+	ymu16	per;
+
+	per = ( rHigh << 8 ) + rLow;
+	return per;
+}
+
+
+
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -819,23 +948,6 @@ static ymu32	Ym2149_ToneStepCompute(ymu8 rHigh , ymu8 rLow)
  * 	per==3   step=0x0f1dfe1   freq=41.7 kHz
  */
 
-#ifndef NEWSTEP
-static ymu32	Ym2149_NoiseStepCompute(ymu8 rNoise)
-{
-	int	per;
-	yms64	step;
-
-	per = (rNoise&0x1f);
-	if (per<3)
-		return 0;
-
-	step = YM_ATARI_CLOCK;
-	step <<= (16-1-3);
-	step /= (per * YM_REPLAY_FREQ);
-
-	return step;
-}
-#else
 static ymu32	Ym2149_NoiseStepCompute(ymu8 rNoise)
 {
 	int	per;
@@ -844,7 +956,7 @@ static ymu32	Ym2149_NoiseStepCompute(ymu8 rNoise)
 	per = (rNoise&0x1f);
 
 	if ( per == 0 )
-		per = 1;				/* result for Per=0 is the same as for Per=1 */	
+		per = 1;
 
 	step = YM_ATARI_CLOCK;
 	step <<= 24;
@@ -853,7 +965,8 @@ static ymu32	Ym2149_NoiseStepCompute(ymu8 rNoise)
 
 	return step;
 }
-#endif
+
+
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -896,6 +1009,29 @@ static ymu32	Ym2149_EnvStepCompute(ymu8 rHigh , ymu8 rLow)
 
 /*-----------------------------------------------------------------------*/
 /**
+ * Filter tone period to get audible results
+ *  - in the YM2149, per=0 is the same as per=1
+ *  - if per is too low compared to the current replay freq, we output
+ *    a constant signal (on a real ST, period <= 9 is not audible in most cases)
+ * TODO : remove this function as we emulate YM2149 at 250 kHz
+ */
+
+static void	YM2149_TonePerFilter (ymu16 per , ymu16 *pTone_force)
+{
+	*pTone_force = 0;
+
+#ifndef	YM_250_MORE
+	/* Discard frequencies higher than 80% of nyquist rate (depending on the current replay freq in Hatari) */
+	/* Output a constant signal in that case */
+	if  ( per <= (int)(YM_ATARI_CLOCK/(YM_REPLAY_FREQ*7)) )
+		*pTone_force = YM_SQUARE_UP;
+#endif
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
  * Main function : compute the value of the next sample.
  * Mixes all 3 voices with tone+noise+env and apply low pass
  * filter if needed.
@@ -908,77 +1044,8 @@ static ymu32	Ym2149_EnvStepCompute(ymu8 rHigh , ymu8 rLow)
  * to all 0 bits or all 1 bits using a '-'
  */
 
-#ifndef NEWSTEP
-static ymsample	YM2149_NextSample(void)
-{
-	ymsample	sample;
-	int		bt;
-	ymu32		bn;
-	ymu16		Env3Voices;
-	ymu16		Tone3Voices;
+#ifndef YM_250
 
-
-	/* Noise value : 0 or 0xffff */
-	if ( noisePos&0xffff0000 )
-	{
-		currentNoise = YM2149_RndCompute();
-		noisePos &= 0xffff;
-	}
-	bn = currentNoise;				/* 0 or 0xffff */
-
-	/* Get the 5 bits volume corresponding to the current envelope's position */
-	Env3Voices = YmEnvWaves[ envShape ][ envPos>>24 ];	/* integer part of envPos is in bits 24-31 */
-	Env3Voices &= EnvMask3Voices;			/* only keep volumes for voices using envelope */
-
-//fprintf ( stderr , "env %x %x %x\n" , Env3Voices , envStep , envPos );
-
-	/* Tone3Voices will contain the output state of each voice : 0 or 0x1f */
-	bt = ((((yms32)posA)>>31) | mixerTA) & (bn | mixerNA);	/* 0 or 0xffff */
-	Tone3Voices = bt & YM_MASK_1VOICE;			/* 0 or 0x1f */
-	bt = ((((yms32)posB)>>31) | mixerTB) & (bn | mixerNB);
-	Tone3Voices |= ( bt & YM_MASK_1VOICE ) << 5;
-	bt = ((((yms32)posC)>>31) | mixerTC) & (bn | mixerNC);
-	Tone3Voices |= ( bt & YM_MASK_1VOICE ) << 10;
-
-	/* Combine fixed volumes and envelope volumes and keep the resulting */
-	/* volumes depending on the output state of each voice (0 or 0x1f) */
-	Tone3Voices &= ( Env3Voices | Vol3Voices );
-
-	/* When a step period is 0, the represented frequency was filtered from the */
-	/* ouput of the YM2149. Thus, use the transient DC component of the sample. */
-	/* Note that the "-1" table offset is a "good fit" for the DC component.    */
-
-	if (stepA == 0  &&  (Tone3Voices & YM_MASK_A) > 1)
-		Tone3Voices -= 1;     /* Voice A AC component removed; Transient DC component remains */
-
-	if (stepB == 0  &&  (Tone3Voices & YM_MASK_B) > 1<<5)
-		Tone3Voices -= 1<<5;  /* Voice B AC component removed; Transient DC component remains */
-
-	if (stepC == 0  &&  (Tone3Voices & YM_MASK_C) > 1<<10)
-		Tone3Voices -= 1<<10; /* Voice C AC component removed; Transient DC component remains */
-
-	/* D/A conversion of the 3 volumes into a sample using a precomputed conversion table */
-
-	sample = ymout5[ Tone3Voices ];			/* 16 bits signed value */
-
-
-	/* Increment positions */
-	posA += stepA;
-	posB += stepB;
-	posC += stepC;
-	noisePos += noiseStep;
-
-	envPos += envStep;
-	if ( envPos >= (3*32) << 24 )			/* blocks 0, 1 and 2 were used (envPos 0 to 95) */
-		envPos -= (2*32) << 24;			/* replay/loop blocks 1 and 2 (envPos 32 to 95) */
-
-	/* Apply low pass filter ? */
-	if ( UseLowPassFilter )
-		return LowPassFilter(sample);
-	else
-		return PWMaliasFilter(sample);
-}
-#else
 static ymsample	YM2149_NextSample(void)
 {
 	ymsample	sample;
@@ -997,10 +1064,10 @@ static ymsample	YM2149_NextSample(void)
 	bn = currentNoise;				/* 0 or 0xffff */
 
 	/* Get the 5 bits volume corresponding to the current envelope's position */
-	Env3Voices = YmEnvWaves[ envShape ][ envPos>>24 ];	/* integer part of envPos is in bits 24-31 */
+	Env3Voices = YmEnvWaves[ Env_shape ][ Env_pos>>24 ];	/* integer part of Env_pos is in bits 24-31 */
 	Env3Voices &= EnvMask3Voices;			/* only keep volumes for voices using envelope */
 
-//fprintf ( stderr , "env %x %x %x\n" , Env3Voices , envStep , envPos );
+//fprintf ( stderr , "env %x %x %x\n" , Env3Voices , envStep , Env_pos );
 
 	/* Tone3Voices will contain the output state of each voice : 0 or 0x1f */
 	bt = -( (posA>>24) & 1);			/* 0 if bit24=0 or 0xffffffff if bit24=1 */
@@ -1037,29 +1104,512 @@ static ymsample	YM2149_NextSample(void)
 	posC += stepC;
 	noisePos += noiseStep;
 
-	envPos += envStep;
-	if ( envPos >= (3*32) << 24 )			/* blocks 0, 1 and 2 were used (envPos 0 to 95) */
-		envPos -= (2*32) << 24;			/* replay/loop blocks 1 and 2 (envPos 32 to 95) */
+	Env_pos += envStep;
+	if ( Env_pos >= (3*32) << 24 )			/* blocks 0, 1 and 2 were used (Env_pos 0 to 95) */
+		Env_pos -= (2*32) << 24;		/* replay/loop blocks 1 and 2 (Env_pos 32 to 95) */
 
 	/* Apply low pass filter ? */
-	if ( UseLowPassFilter )
+	if ( YM2149_LPF_Filter == YM2149_LPF_FILTER_PWM )
+		return PWMaliasFilter(sample);
+	else if ( YM2149_LPF_Filter == YM2149_LPF_FILTER_LPF_STF )
 		return LowPassFilter(sample);
 	else
+		return sample;
+}
+
+#else
+
+#ifndef YM_250_MORE
+static ymsample	YM2149_NextSample_250(void)
+{
+	ymsample	sample;
+	ymu32		bt;
+	ymu16		Env3Voices;			/* 0x00CCBBAA */
+	ymu16		Tone3Voices;			/* 0x00CCBBAA */
+	static ymu16	Freq_div_2 = 0;
+
+
+	/* Emulate as many internal YM cycles as needed until we reach */
+	/* the expected replay freq YM_REPLAY_FREQ */
+	while ( YM_Clock_Step < YM_ATARI_CLOCK_COUNTER )
+	{
+		/* Emulate 1 internal YM2149 cycle : increase all counters */
+		/* As measured on a real YM2149, result for per==0 is the same as for per==1 */
+		/* To obtain this in our code, counters are incremented first, then compared to per, */
+		/* which gives the same result when per=1 and when per=0 */
+
+		/* Special case for noise counter, it's increased at 125 KHz, not 250 KHz */
+		Freq_div_2 ^= 1;
+		if ( Freq_div_2 == 0 )
+			Noise_count++;
+		if ( Noise_count >= Noise_per )
+		{
+			Noise_count = 0;
+			Noise_val = YM2149_RndCompute();/* 0 or 0xffff */
+		}
+
+		/* Other counters are increased on every call, at 250 KHz */
+		ToneA_count++;
+		if ( ToneA_count >= ToneA_per )
+		{
+			ToneA_count = 0;
+			ToneA_val ^= YM_SQUARE_UP;	/* 0 or 0x1f */
+		}
+
+		ToneB_count++;
+		if ( ToneB_count >= ToneB_per )
+		{
+			ToneB_count = 0;
+			ToneB_val ^= YM_SQUARE_UP;	/* 0 or 0x1f */
+		}
+
+		ToneC_count++;
+		if ( ToneC_count >= ToneC_per )
+		{
+			ToneC_count = 0;
+			ToneC_val ^= YM_SQUARE_UP;	/* 0 or 0x1f */
+		}
+
+		Env_count += 1;
+		if ( Env_count >= Env_per )
+		{
+			Env_count = 0;
+			Env_pos += 1;
+			if ( Env_pos >= 3*32 )		/* blocks 0, 1 and 2 were used (Env_pos 0 to 95) */
+				Env_pos -= 2*32;	/* replay/loop blocks 1 and 2 (Env_pos 32 to 95) */
+		}
+
+		/* Increase ratio counter between YM_Clock and AudioFreq */
+		YM_Clock_Step += YM_REPLAY_FREQ;
+	}
+	YM_Clock_Step -= YM_ATARI_CLOCK_COUNTER;
+
+	/* Build 'sample' value with the latest values of tone/noise/volume/env */
+
+	/* Get the 5 bits volume corresponding to the current envelope's position */
+	Env3Voices = YmEnvWaves[ Env_shape ][ Env_pos ];
+	Env3Voices &= EnvMask3Voices;			/* only keep volumes for voices using envelope */
+
+	/* Tone3Voices will contain the output state of each voice : 0 or 0x1f */
+	bt = ToneA_val | ToneA_force;			/* Force tone to constant 0x1f if needed (filter for very low per values) */
+	bt = (bt | mixerTA) & (Noise_val | mixerNA);	/* 0 or 0xffff */
+	Tone3Voices = bt & YM_MASK_1VOICE;		/* 0 or 0x1f */
+
+	bt = ToneB_val | ToneB_force;
+	bt = (bt | mixerTB) & (Noise_val | mixerNB);
+	Tone3Voices |= ( bt & YM_MASK_1VOICE ) << 5;
+
+	bt = ToneC_val | ToneC_force;
+	bt = (bt | mixerTC) & (Noise_val | mixerNC);
+	Tone3Voices |= ( bt & YM_MASK_1VOICE ) << 10;
+
+	/* Combine fixed volumes and envelope volumes and keep the resulting */
+	/* volumes depending on the output state of each voice (0 or 0x1f) */
+	Tone3Voices &= ( Env3Voices | Vol3Voices );
+
+	/* D/A conversion of the 3 volumes into a sample using a precomputed conversion table */
+	if (ToneA_force && (Tone3Voices & YM_MASK_A) > 1)
+		Tone3Voices -= 1;    			/* Voice A AC component removed; Transient DC component remains */
+
+	if (ToneB_force && (Tone3Voices & YM_MASK_B) > 1<<5)
+		Tone3Voices -= 1<<5;  			/* Voice B AC component removed; Transient DC component remains */
+
+	if (ToneC_force && (Tone3Voices & YM_MASK_C) > 1<<10)
+		Tone3Voices -= 1<<10;			/* Voice C AC component removed; Transient DC component remains */
+
+	sample = ymout5[ Tone3Voices ];			/* 16 bits signed value */
+
+	/* Apply low pass filter ? */
+	if ( YM2149_LPF_Filter == YM2149_LPF_FILTER_LPF_STF )
+		return LowPassFilter(sample);
+	else if ( YM2149_LPF_Filter == YM2149_LPF_FILTER_PWM )
 		return PWMaliasFilter(sample);
+	else
+		return sample;
+}
+
+#else
+
+
+
+
+#ifdef YM_250_DEBUG
+/*-----------------------------------------------------------------------*/
+/**
+ * Write raw 250 kHz samples into a wav sound file as "mono + signed 16 bit PCM + little endian"
+ * This is used to compare sound before downsampling at native output freq (eg 44.1 kHz)
+ * and to measure the quality of the downsampling method
+ */
+static void	YM2149_DoSamples_250_Debug ( int SamplesToGenerate , int pos )
+{
+	static Uint8 WavHeader[] =
+	{
+		/* RIFF chunk */
+		'R', 'I', 'F', 'F',      /* "RIFF" (ASCII Characters) */
+		0, 0, 0, 0,              /* Total Length Of Package To Follow (patched when file is closed) */
+		'W', 'A', 'V', 'E',      /* "WAVE" (ASCII Characters) */
+		/* Format chunk */
+		'f', 'm', 't', ' ',      /* "fmt_" (ASCII Characters) */
+		0x10, 0, 0, 0,           /* Length Of FORMAT Chunk (always 0x10) */
+		0x01, 0,                 /* Always 0x01 */
+		0x02, 0,                 /* Number of channels (2 for stereo) */
+		0, 0, 0, 0,              /* Sample rate (patched when file header is written) */
+		0, 0, 0, 0,              /* Bytes per second (patched when file header is written) */
+		0x04, 0,                 /* Bytes per sample (4 = 16 bit stereo) */
+		0x10, 0,                 /* Bits per sample (16 bit) */
+		/* Data chunk */
+		'd', 'a', 't', 'a',
+		0, 0, 0, 0,              /* Length of data to follow (will be patched when file is closed) */
+	};
+	FILE		*file_ptr;
+	int		val;
+	ymsample	sample;
+	int		n;
+	static int	wav_size;
+
+
+	if ( File_Exists ( "hatari_250.wav" ) )
+	{
+		file_ptr = fopen( "hatari_250.wav", "rb+");
+		fseek ( file_ptr , 0 , SEEK_END );
+	}
+	else
+	{
+		file_ptr = fopen( "hatari_250.wav", "wb");
+		/* Patch mono, 2 bytes per sample */
+		WavHeader[22] = (Uint8)0x01;
+		WavHeader[32] = (Uint8)0x02;
+
+		/* Patch sample frequency in header structure */
+		val = 250000;
+		WavHeader[24] = (Uint8)val;
+		WavHeader[25] = (Uint8)(val >> 8);
+		WavHeader[26] = (Uint8)(val >> 16);
+		WavHeader[27] = (Uint8)(val >> 24);
+		/* Patch bytes per second in header structure */
+		val = 250000 * 2;
+		WavHeader[28] = (Uint8)val;
+		WavHeader[29] = (Uint8)(val >> 8);
+		WavHeader[30] = (Uint8)(val >> 16);
+		WavHeader[31] = (Uint8)(val >> 24);
+
+		fwrite ( &WavHeader, sizeof(WavHeader), 1, file_ptr );
+	}
+
+	for ( n=0 ; n<SamplesToGenerate_250 ; n++ )
+	{
+		sample = SDL_SwapLE16 ( YM_Buffer_250[ pos ] );
+		fwrite ( &sample , sizeof(sample) , 1 , file_ptr );
+		pos = ( pos + 1 ) % YM_BUFFER_250_SIZE;
+		wav_size += 2;
+	}
+
+	/* Update sizes in header */
+	val = 12+24+8+wav_size-8;			/* RIFF size */
+	WavHeader[4] = (Uint8)val;
+	WavHeader[5] = (Uint8)(val >> 8);
+	WavHeader[6] = (Uint8)(val >> 16);
+	WavHeader[7] = (Uint8)(val >> 24);
+	val = wav_size;					/* data size */
+	WavHeader[40] = (Uint8)val;
+	WavHeader[41] = (Uint8)(val >> 8);
+	WavHeader[42] = (Uint8)(val >> 16);
+	WavHeader[43] = (Uint8)(val >> 24);
+
+	rewind ( file_ptr );
+	fwrite ( &WavHeader, sizeof(WavHeader), 1, file_ptr );
+
+	fclose ( file_ptr );
 }
 #endif
 
+
+static void	YM2149_DoSamples_250 ( int SamplesToGenerate )
+{
+	ymsample	sample;
+	ymu32		bt;
+	ymu16		Env3Voices;			/* 0x00CCBBAA */
+	ymu16		Tone3Voices;			/* 0x00CCBBAA */
+	static ymu16	Freq_div_2 = 0;
+	int		pos;
+	int		n;
+
+
+	/* Generate enough 250 kHz samples to obtain SamplesToGenerate + 1 samples after downsampling to YM_REPLAY_FREQ */
+	SamplesToGenerate_250 = floor ( (double)( SamplesToGenerate + 1 ) * YM_ATARI_CLOCK_COUNTER / YM_REPLAY_FREQ );
+
+	/* We need to generate less samples if some of the previous ones were not read yet */
+	/* (handle the case where pos_write can wrap at the end of the ring buffer) */
+	if ( YM_Buffer_250_pos_write >= YM_Buffer_250_pos_read )
+		SamplesToGenerate_250 -= ( YM_Buffer_250_pos_write - YM_Buffer_250_pos_read );
+	else
+		SamplesToGenerate_250 -= ( YM_Buffer_250_pos_write + YM_BUFFER_250_SIZE - YM_Buffer_250_pos_read );
+
+	/* Don't do anything if there's already enough samples between pos_read and pos_write */
+	if ( SamplesToGenerate_250 <= 0 )
+		return;
+
+	pos = YM_Buffer_250_pos_write;
+
+	/* Emulate as many internal YM cycles as needed to generate samples */
+	for ( n=0 ; n<SamplesToGenerate_250 ; n++ )
+	{
+		/* Emulate 1 internal YM2149 cycle : increase all counters */
+		/* As measured on a real YM2149, result for per==0 is the same as for per==1 */
+		/* To obtain this in our code, counters are incremented first, then compared to per, */
+		/* which gives the same result when per=1 and when per=0 */
+
+		/* Special case for noise counter, it's increased at 125 KHz, not 250 KHz */
+		Freq_div_2 ^= 1;
+		if ( Freq_div_2 == 0 )
+			Noise_count++;
+		if ( Noise_count >= Noise_per )
+		{
+			Noise_count = 0;
+			Noise_val = YM2149_RndCompute();/* 0 or 0xffff */
+		}
+
+		/* Other counters are increased on every call, at 250 KHz */
+		ToneA_count++;
+		if ( ToneA_count >= ToneA_per )
+		{
+			ToneA_count = 0;
+			ToneA_val ^= YM_SQUARE_UP;	/* 0 or 0x1f */
+		}
+
+		ToneB_count++;
+		if ( ToneB_count >= ToneB_per )
+		{
+			ToneB_count = 0;
+			ToneB_val ^= YM_SQUARE_UP;	/* 0 or 0x1f */
+		}
+
+		ToneC_count++;
+		if ( ToneC_count >= ToneC_per )
+		{
+			ToneC_count = 0;
+			ToneC_val ^= YM_SQUARE_UP;	/* 0 or 0x1f */
+		}
+
+		Env_count += 1;
+		if ( Env_count >= Env_per )
+		{
+			Env_count = 0;
+			Env_pos += 1;
+			if ( Env_pos >= 3*32 )		/* blocks 0, 1 and 2 were used (Env_pos 0 to 95) */
+				Env_pos -= 2*32;	/* replay/loop blocks 1 and 2 (Env_pos 32 to 95) */
+		}
+
+		/* Build 'sample' value with the values of tone/noise/volume/env */
+
+		/* Get the 5 bits volume corresponding to the current envelope's position */
+		Env3Voices = YmEnvWaves[ Env_shape ][ Env_pos ];
+		Env3Voices &= EnvMask3Voices;			/* only keep volumes for voices using envelope */
+
+		/* Tone3Voices will contain the output state of each voice : 0 or 0x1f */
+		/* TODO : remove ToneX_force, not needed at 250 kHz */
+		bt = ToneA_val | ToneA_force;			/* Force tone to constant 0x1f if needed (filter for very low per values) */
+		bt = (bt | mixerTA) & (Noise_val | mixerNA);	/* 0 or 0xffff */
+		Tone3Voices = bt & YM_MASK_1VOICE;		/* 0 or 0x1f */
+
+		bt = ToneB_val | ToneB_force;
+		bt = (bt | mixerTB) & (Noise_val | mixerNB);
+		Tone3Voices |= ( bt & YM_MASK_1VOICE ) << 5;
+
+		bt = ToneC_val | ToneC_force;
+		bt = (bt | mixerTC) & (Noise_val | mixerNC);
+		Tone3Voices |= ( bt & YM_MASK_1VOICE ) << 10;
+
+		/* Combine fixed volumes and envelope volumes and keep the resulting */
+		/* volumes depending on the output state of each voice (0 or 0x1f) */
+		Tone3Voices &= ( Env3Voices | Vol3Voices );
+
+		/* D/A conversion of the 3 volumes into a sample using a precomputed conversion table */
+		if (ToneA_force && (Tone3Voices & YM_MASK_A) > 1)
+			Tone3Voices -= 1;    			/* Voice A AC component removed; Transient DC component remains */
+
+		if (ToneB_force && (Tone3Voices & YM_MASK_B) > 1<<5)
+			Tone3Voices -= 1<<5;  			/* Voice B AC component removed; Transient DC component remains */
+
+		if (ToneC_force && (Tone3Voices & YM_MASK_C) > 1<<10)
+			Tone3Voices -= 1<<10;			/* Voice C AC component removed; Transient DC component remains */
+
+		sample = ymout5[ Tone3Voices ];			/* 16 bits signed value */
+
+		/* Apply low pass filter ? */
+		if ( YM2149_LPF_Filter == YM2149_LPF_FILTER_LPF_STF )
+			sample = LowPassFilter ( sample );
+		else if ( YM2149_LPF_Filter == YM2149_LPF_FILTER_PWM )
+			sample = PWMaliasFilter ( sample );
+
+		/* Store sample */
+		YM_Buffer_250[ pos ] = sample;
+		pos = ( pos + 1 ) % YM_BUFFER_250_SIZE;
+	}
+
+
+#ifdef YM_250_DEBUG
+	/* write raw 250 kHz samples into a wav file */
+	YM2149_DoSamples_250_Debug ( SamplesToGenerate_250 , YM_Buffer_250_pos_write );
+#endif
+
+	YM_Buffer_250_pos_write = pos;
+
+}
+
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Downsample the YM2149 samples data from 250 KHz to YM_REPLAY_FREQ and
+ * return the next sample to output.
+ *
+ * This method will choose the nearest sample from the input buffer
+ * which can be not precise enough when frequencies from the input
+ * buffer are much higher than YM_REPLAY_FREQ (see Nyquist rate)
+ *
+ * advantage : fast method
+ * disadvantage : more aliasing when high frequency notes are played
+ */
+static ymsample	YM2149_Next_Resample_Nearest ( void )
+{
+	static double	pos_fract = 0;
+	ymsample	sample;
+
+
+	/* Get the nearest sample at pos_read or pos_read+1 */
+	if ( pos_fract < 0.5 )
+		sample = YM_Buffer_250[ YM_Buffer_250_pos_read ];
+	else
+		sample = YM_Buffer_250[ ( YM_Buffer_250_pos_read + 1 ) % YM_BUFFER_250_SIZE ];
+
+	/* Increase fractional pos and integer pos */
+	pos_fract += ( (double)YM_ATARI_CLOCK_COUNTER ) / YM_REPLAY_FREQ;
+
+	YM_Buffer_250_pos_read = ( YM_Buffer_250_pos_read + (int)pos_fract ) % YM_BUFFER_250_SIZE;
+	pos_fract -= (int)pos_fract;			/* 0 <= pos_fract < 1 */
+
+	return sample;
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Downsample the YM2149 samples data from 250 KHz to YM_REPLAY_FREQ and
+ * return the next sample to output.
+ *
+ * This method will do a weighted average between the 2 input samples
+ * surrounding the theoretical position of the sample we want to generate
+ *
+ * It's a little slower than 'Resample_Nearest' but more accurate 
+ */
+static ymsample	YM2149_Next_Resample_Weighted_Average_2 ( void )
+{
+	static double	pos_fract = 0;
+	ymsample	sample_before , sample_after;
+	ymsample	sample;
+
+
+	/* Get the 2 samples that surround pos_read and do a weighted average */
+	sample_before = YM_Buffer_250[ YM_Buffer_250_pos_read ];
+	sample_after = YM_Buffer_250[ ( YM_Buffer_250_pos_read + 1 ) % YM_BUFFER_250_SIZE ];
+	sample = round ( ( 1.0 - pos_fract ) * sample_before + pos_fract * sample_after );
+//fprintf ( stderr , "b=%04x a=%04x frac=%f -> res=%04x\n" , sample_before , sample_after , pos_fract , sample );
+
+	/* Increase fractional pos and integer pos */
+	pos_fract += ( (double)YM_ATARI_CLOCK_COUNTER ) / YM_REPLAY_FREQ;
+
+	YM_Buffer_250_pos_read = ( YM_Buffer_250_pos_read + (int)pos_fract ) % YM_BUFFER_250_SIZE;
+	pos_fract -= (int)pos_fract;			/* 0 <= pos_fract < 1 */
+
+	return sample;
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Downsample the YM2149 samples data from 250 KHz to YM_REPLAY_FREQ and
+ * return the next sample to output.
+ *
+ * This method will do a weighted average of all the sample from the input
+ * buffer that surround an output sample (for example 250 KHz / 44.1 KHz would
+ * do a weighted average on ~5.66 input samples)
+ * It is based on the resample function used in MAME which computes
+ * the average energy on an interval by summing samples (see src/emu/sound.c in MAME)
+ *
+ * It's slower than 'Weighted_Average_2' but it's more accurate as it uses all the
+ * samples from the input buffer and works better when the input signal has some very
+ * high frequencies (eg when YM voice uses period 0 to 6)
+ *
+ * For better accuracy without using floating point, fractional values are multiplied
+ * by 0x10000 and stored using 32 or 64 bits : upper bits are the integer part and
+ * lower 16 bits are the decimal part.
+ */
+ static ymsample	YM2149_Next_Resample_Weighted_Average_N ( void )
+{
+	static Uint32	pos_fract = 0;
+	Uint32		interval_fract;
+	Sint64		total;
+	ymsample	sample;
+
+
+	interval_fract = ( YM_ATARI_CLOCK_COUNTER * 0x10000LL ) / YM_REPLAY_FREQ;	/* 'LL' ensure the div is made on 64 bits */
+	total = 0;
+
+	if ( pos_fract )				/* start position : 0xffff <= pos_fract <= 0 */
+	{
+		total += ((Sint64)YM_Buffer_250[ YM_Buffer_250_pos_read ]) * ( 0x10000 - pos_fract );
+		YM_Buffer_250_pos_read = ( YM_Buffer_250_pos_read + 1 ) % YM_BUFFER_250_SIZE;
+		pos_fract -= 0x10000;			/* next sample */
+	}
+
+	pos_fract += interval_fract;			/* end position */
+
+	while ( pos_fract & 0xffff0000 )		/* check integer part */
+	{
+		total += ((Sint64)YM_Buffer_250[ YM_Buffer_250_pos_read ]) * 0x10000;
+		YM_Buffer_250_pos_read = ( YM_Buffer_250_pos_read + 1 ) % YM_BUFFER_250_SIZE;
+		pos_fract -= 0x10000;			/* next sample */
+	}
+
+	if ( pos_fract )				/* partial end sample if 0xffff <= pos_fract < 0 */
+	{
+		total += ((Sint64)YM_Buffer_250[ YM_Buffer_250_pos_read ]) * pos_fract;
+	}
+
+	sample = total / interval_fract;
+	return sample;
+}
+
+
+
+static ymsample	YM2149_NextSample_250_2 ( void )
+{
+	if ( YM2149_Resample_Method == YM2149_RESAMPLE_METHOD_WEIGHTED_AVERAGE_2 )
+		return YM2149_Next_Resample_Weighted_Average_2 ();
+
+	else if ( YM2149_Resample_Method == YM2149_RESAMPLE_METHOD_NEAREST )
+		return YM2149_Next_Resample_Nearest ();
+
+	else if ( YM2149_Resample_Method == YM2149_RESAMPLE_METHOD_WEIGHTED_AVERAGE_N )
+		return YM2149_Next_Resample_Weighted_Average_N ();
+
+	else
+		return 0;
+}
+#endif
+
+#endif
 
 /*-----------------------------------------------------------------------*/
 /**
  * Update internal variables (steps, volume masks, ...) each
  * time an YM register is changed.
  */
-#ifndef NEWSTEP
-#define BIT_SHIFT 31
-#else
 #define BIT_SHIFT 24
-#endif
 void	Sound_WriteReg( int reg , Uint8 data )
 {
 	switch (reg)
@@ -1068,36 +1618,42 @@ void	Sound_WriteReg( int reg , Uint8 data )
 			SoundRegs[0] = data;
 			stepA = Ym2149_ToneStepCompute ( SoundRegs[1] , SoundRegs[0] );
 			if (!stepA) posA = 1u<<BIT_SHIFT;		// Assume output always 1 if 0 period (for Digi-sample)
+			ToneA_per = YM2149_TonePer ( SoundRegs[1] , SoundRegs[0] , &ToneA_force );
 			break;
 
 		case 1:
 			SoundRegs[1] = data & 0x0f;
 			stepA = Ym2149_ToneStepCompute ( SoundRegs[1] , SoundRegs[0] );
 			if (!stepA) posA = 1u<<BIT_SHIFT;		// Assume output always 1 if 0 period (for Digi-sample)
+			ToneA_per = YM2149_TonePer ( SoundRegs[1] , SoundRegs[0] , &ToneA_force );
 			break;
 
 		case 2:
 			SoundRegs[2] = data;
 			stepB = Ym2149_ToneStepCompute ( SoundRegs[3] , SoundRegs[2] );
 			if (!stepB) posB = 1u<<BIT_SHIFT;		// Assume output always 1 if 0 period (for Digi-sample)
+			ToneB_per = YM2149_TonePer ( SoundRegs[3] , SoundRegs[2] , &ToneB_force );
 			break;
 
 		case 3:
 			SoundRegs[3] = data & 0x0f;
 			stepB = Ym2149_ToneStepCompute ( SoundRegs[3] , SoundRegs[2] );
 			if (!stepB) posB = 1u<<BIT_SHIFT;		// Assume output always 1 if 0 period (for Digi-sample)
+			ToneB_per = YM2149_TonePer ( SoundRegs[3] , SoundRegs[2] , &ToneB_force );
 			break;
 
 		case 4:
 			SoundRegs[4] = data;
 			stepC = Ym2149_ToneStepCompute ( SoundRegs[5] , SoundRegs[4] );
 			if (!stepC) posC = 1u<<BIT_SHIFT;		// Assume output always 1 if 0 period (for Digi-sample)
+			ToneC_per = YM2149_TonePer ( SoundRegs[5] , SoundRegs[4] , &ToneC_force );
 			break;
 
 		case 5:
 			SoundRegs[5] = data & 0x0f;
 			stepC = Ym2149_ToneStepCompute ( SoundRegs[5] , SoundRegs[4] );
 			if (!stepC) posC = 1u<<BIT_SHIFT;		// Assume output always 1 if 0 period (for Digi-sample)
+			ToneC_per = YM2149_TonePer ( SoundRegs[5] , SoundRegs[4] , &ToneC_force );
 			break;
 
 		case 6:
@@ -1108,6 +1664,7 @@ void	Sound_WriteReg( int reg , Uint8 data )
 				noisePos = 0;
 				currentNoise = 0xffff;
 			}
+			Noise_per = YM2149_NoisePer ( SoundRegs[6] );
 			break;
 
 		case 7:
@@ -1168,17 +1725,20 @@ void	Sound_WriteReg( int reg , Uint8 data )
 		case 11:
 			SoundRegs[11] = data;
 			envStep = Ym2149_EnvStepCompute ( SoundRegs[12] , SoundRegs[11] );
+			Env_per = YM2149_EnvPer ( SoundRegs[12] , SoundRegs[11] );
 			break;
 
 		case 12:
 			SoundRegs[12] = data;
 			envStep = Ym2149_EnvStepCompute ( SoundRegs[12] , SoundRegs[11] );
+			Env_per = YM2149_EnvPer ( SoundRegs[12] , SoundRegs[11] );
 			break;
 
 		case 13:
 			SoundRegs[13] = data & 0xf;
-			envPos = 0;					/* when writing to EnvShape, we must reset the EnvPos */
-			envShape = SoundRegs[13];
+			Env_pos = 0;					/* when writing to Env_shape, we must reset the Env_pos */
+			Env_count = 0;					/* this also starts a new phase */
+			Env_shape = SoundRegs[13];
 			bEnvelopeFreqFlag = true;			/* used for YmFormat saving */
 			break;
 
@@ -1284,8 +1844,8 @@ void Sound_MemorySnapShot_Capture(bool bSave)
 	MemorySnapShot_Store(&RndRack, sizeof(RndRack));
 
 	MemorySnapShot_Store(&envStep, sizeof(envStep));
-	MemorySnapShot_Store(&envPos, sizeof(envPos));
-	MemorySnapShot_Store(&envShape, sizeof(envShape));
+	MemorySnapShot_Store(&Env_pos, sizeof(Env_pos));
+	MemorySnapShot_Store(&Env_shape, sizeof(Env_shape));
 
 	MemorySnapShot_Store(&EnvMask3Voices, sizeof(EnvMask3Voices));
 	MemorySnapShot_Store(&Vol3Voices, sizeof(Vol3Voices));
@@ -1293,7 +1853,11 @@ void Sound_MemorySnapShot_Capture(bool bSave)
 	MemorySnapShot_Store(SoundRegs, sizeof(SoundRegs));
 
 	// MemorySnapShot_Store(&YmVolumeMixing, sizeof(YmVolumeMixing));
-	// MemorySnapShot_Store(&UseLowPassFilter, sizeof(UseLowPassFilter));
+
+#ifdef YM_250
+Env_pos = 0;
+#endif
+
 }
 
 
@@ -1311,25 +1875,6 @@ static int Sound_SetSamplesPassed(bool FillFrame)
 	int nSoundCycles;
 	int SamplesToGenerate;				/* How many samples are needed for this time-frame */
 
-	nSoundCycles = Cycles_GetCounter(CYCLES_COUNTER_VIDEO);
-
-	/* example : 160256 cycles per VBL, 44Khz = 882 samples per VBL at 50 Hz */
-	/* 882/160256 samples per cpu clock cycle */
-
-	/* Total number of samples that we should have at this point of the VBL */
-	SamplesToGenerate = nSoundCycles * SamplesPerFrame
-		/ ClocksTimings_GetCyclesPerVBL ( ConfigureParams.System.nMachineType , nScreenRefreshRate );
-
-//if (SamplesToGenerate > SamplesPerFrame )
-//fprintf ( stderr , "over run %d %d\n" , SamplesPerFrame , SamplesToGenerate );
-
-	if (SamplesToGenerate > SamplesPerFrame)
-		SamplesToGenerate = SamplesPerFrame;
-
-	SamplesToGenerate -= CurrentSamplesNb;		/* don't count samples that were already generated up to now */
-	if ( SamplesToGenerate < 0 )
-		SamplesToGenerate = 0;
-
 
 	/* If we're called from the VBL interrupt (FillFrame==true), we must ensure we have */
 	/* an exact total of SamplesPerFrame samples during a full VBL (we take into account */
@@ -1337,9 +1882,32 @@ static int Sound_SetSamplesPassed(bool FillFrame)
 	if ( FillFrame )
 	{
 		SamplesToGenerate = SamplesPerFrame - CurrentSamplesNb;	/* how many samples are missing to reach SamplesPerFrame */
-		if ( SamplesToGenerate < 0 )
-			SamplesToGenerate = 0;
 	}
+
+	else
+	{
+		// TODO use the difference with previous value of CyclesGlobalClockCounter (when FillFrame==true) instead of CYCLES_COUNTER_VIDEO
+		nSoundCycles = Cycles_GetCounter(CYCLES_COUNTER_VIDEO);
+//fprintf ( stderr , "nSoundCycles %d SamplesPerFrame %d\n" , nSoundCycles , SamplesPerFrame );
+
+		/* example : 160256 cycles per VBL, 44Khz = 882 samples per VBL at 50 Hz */
+		/* 882/160256 samples per cpu clock cycle */
+
+		/* Total number of samples that we should have at this point of the VBL */
+		SamplesToGenerate = nSoundCycles * SamplesPerFrame
+			/ ClocksTimings_GetCyclesPerVBL ( ConfigureParams.System.nMachineType , nScreenRefreshRate );
+
+//if (SamplesToGenerate > SamplesPerFrame )
+//fprintf ( stderr , "over run %d %d\n" , SamplesPerFrame , SamplesToGenerate );
+
+		if (SamplesToGenerate > SamplesPerFrame)
+			SamplesToGenerate = SamplesPerFrame;
+
+		SamplesToGenerate -= CurrentSamplesNb;		/* don't count samples that were already generated up to now */
+	}
+
+	if ( SamplesToGenerate < 0 )
+		SamplesToGenerate = 0;
 
 	/* Check we don't fill the sound's ring buffer before it's played by Audio_Callback()	*/
 	/* This should never happen, except if the system suffers major slowdown due to	other	*/
@@ -1351,7 +1919,12 @@ static int Sound_SetSamplesPassed(bool FillFrame)
 	if ( ( SamplesToGenerate > MIXBUFFER_SIZE - nGeneratedSamples ) && ( ConfigureParams.System.bFastForward == false )
 	    && ( ConfigureParams.Sound.bEnableSound == true ) )
 	{
-		Log_Printf ( LOG_WARN , "Your system is too slow, some sound samples were not correctly emulated\n" );
+		static int logcnt = 0;
+		if (logcnt++ < 50)
+		{
+			Log_Printf(LOG_WARN, "Your system is too slow, "
+			           "some sound samples were not correctly emulated\n");
+		}
 		Sound_BufferIndexNeedReset = true;
 	}
 
@@ -1373,32 +1946,65 @@ static void Sound_GenerateSamples(int SamplesToGenerate)
 	if (SamplesToGenerate <= 0)
 		return;
 
-	if (ConfigureParams.System.nMachineType == MACHINE_FALCON)
+	if (Config_IsMachineFalcon())
 	{
+#ifdef YM_250_MORE
+		YM2149_DoSamples_250 ( SamplesToGenerate );
+#endif
 		for (i = 0; i < SamplesToGenerate; i++)
 		{
 			idx = (ActiveSndBufIdx + i) % MIXBUFFER_SIZE;
+#ifndef YM_250
 			MixBuffer[idx][0] = MixBuffer[idx][1] = Subsonic_IIR_HPF_Left( YM2149_NextSample() );
+#else
+#ifndef YM_250_MORE
+			MixBuffer[idx][0] = MixBuffer[idx][1] = Subsonic_IIR_HPF_Left( YM2149_NextSample_250() );
+#else
+			MixBuffer[idx][0] = MixBuffer[idx][1] = Subsonic_IIR_HPF_Left( YM2149_NextSample_250_2() );
+#endif
+#endif
 		}
  		/* If Falcon emulation, crossbar does the job */
  		Crossbar_GenerateSamples(ActiveSndBufIdx, SamplesToGenerate);
 	}
-	else if (ConfigureParams.System.nMachineType != MACHINE_ST)
+	else if (!Config_IsMachineST())
 	{
+#ifdef YM_250_MORE
+		YM2149_DoSamples_250 ( SamplesToGenerate );
+#endif
 		for (i = 0; i < SamplesToGenerate; i++)
 		{
 			idx = (ActiveSndBufIdx + i) % MIXBUFFER_SIZE;
+#ifndef YM_250
 			MixBuffer[idx][0] = MixBuffer[idx][1] = YM2149_NextSample();
+#else
+#ifndef YM_250_MORE
+			MixBuffer[idx][0] = MixBuffer[idx][1] = YM2149_NextSample_250();
+#else
+			MixBuffer[idx][0] = MixBuffer[idx][1] = YM2149_NextSample_250_2();
+#endif
+#endif
 		}
  		/* If Ste or TT emulation, DmaSnd does mixing and filtering */
  		DmaSnd_GenerateSamples(ActiveSndBufIdx, SamplesToGenerate);
 	}
-	else if (ConfigureParams.System.nMachineType == MACHINE_ST)
+	else
 	{
+#ifdef YM_250_MORE
+		YM2149_DoSamples_250 ( SamplesToGenerate );
+#endif
 		for (i = 0; i < SamplesToGenerate; i++)
 		{
 			idx = (ActiveSndBufIdx + i) % MIXBUFFER_SIZE;
+#ifndef YM_250
 			MixBuffer[idx][0] = MixBuffer[idx][1] = Subsonic_IIR_HPF_Left( YM2149_NextSample() );
+#else
+#ifndef YM_250_MORE
+			MixBuffer[idx][0] = MixBuffer[idx][1] = Subsonic_IIR_HPF_Left( YM2149_NextSample_250() );
+#else
+			MixBuffer[idx][0] = MixBuffer[idx][1] = Subsonic_IIR_HPF_Left( YM2149_NextSample_250_2() );
+#endif
+#endif
 		}
  	}
 
@@ -1425,6 +2031,7 @@ void Sound_Update(bool FillFrame)
 
 	/* Find how many samples to generate */
 	SamplesToGenerate = Sound_SetSamplesPassed( FillFrame );
+//fprintf ( stderr , "sound update %d %d\n" , FillFrame , SamplesToGenerate );
 
 	/* And generate */
 	Sound_GenerateSamples( SamplesToGenerate );
@@ -1436,79 +2043,6 @@ void Sound_Update(bool FillFrame)
 	if (bRecordingWav)
 		WAVFormat_Update(MixBuffer, OldSndBufIdx, SamplesToGenerate);
 }
-
-#ifdef __LIBRETRO__
-extern short signed int SNDBUF[1024*2];
-static void Retro_Audio_CallBack(int len)
-{
-	Sint16 *pBuffer;
-	int i, window, nSamplesPerFrame;
-
-	pBuffer = (Sint16 *)&SNDBUF[0];
-	len = len / 4; // Use length in samples (16 bit stereo), not in bytes
-
-	/* Adjust emulation rate within +/- 0.58% (10 cents) occasionally,
-	 * to synchronize sound. Note that an octave (frequency doubling)
-	 * has 12 semitones (12th root of two for a semitone), and that
-	 * one semitone has 100 cents (1200th root of two for one cent).
-	 * Ten cents are desired, thus, the 120th root of two minus one is
-	 * multiplied by 1,000,000 to convert to microseconds, and divided
-	 * by nScreenRefreshRate=60 to get a 96 microseconds swallow size.
-	 * (2^(10cents/(12semitones*100cents)) - 1) * 10^6 / nScreenRefreshRate
-	 * See: main.c - Main_WaitOnVbl()
-	 */
-
-	pulse_swallowing_count = 0; /* 0 = Unaltered emulation rate */
-
-	if (ConfigureParams.Sound.bEnableSoundSync)
-	{
-		/* Sound synchronized emulation */
-		nSamplesPerFrame = nAudioFrequency/nScreenRefreshRate;
-		window = (nSamplesPerFrame > SoundBufferSize) ? nSamplesPerFrame : SoundBufferSize;
-
-		/* Window Comparator for SoundBufferSize */
-		if (nGeneratedSamples < window + (window >> 1))
-		/* Increase emulation rate to maintain sound synchronization */
-			pulse_swallowing_count = -5793 / nScreenRefreshRate;
-		else
-		if (nGeneratedSamples > (window << 1) + (window >> 2))
-		/* Decrease emulation rate to maintain sound synchronization */
-			pulse_swallowing_count = 5793 / nScreenRefreshRate;
-
-		/* Otherwise emulation rate is unaltered. */
-	}
-	if (nGeneratedSamples >= len)
-	{
-		/* Enough samples available: Pass completed buffer to audio system
-		 * by write samples into sound buffer and by converting them from
-		 * 'signed' to 'unsigned' */
-		for (i = 0; i < len; i++)
-		{
-			*pBuffer++ = MixBuffer[(CompleteSndBufIdx + i) % MIXBUFFER_SIZE][0];
-			*pBuffer++ = MixBuffer[(CompleteSndBufIdx + i) % MIXBUFFER_SIZE][1];
-		}
-		CompleteSndBufIdx += len;
-		nGeneratedSamples -= len;
-	}
-	else /* Not enough samples available: */
-	{
-		for (i = 0; i < nGeneratedSamples; i++)
-		{
-			*pBuffer++ = MixBuffer[(CompleteSndBufIdx + i) % MIXBUFFER_SIZE][0];
-			*pBuffer++ = MixBuffer[(CompleteSndBufIdx + i) % MIXBUFFER_SIZE][1];
-		}
-		/* Clear rest of the buffer to ensure we don't play random bytes instead */
-		/* of missing samples */
-		memset(pBuffer, 0, (len - nGeneratedSamples) * 4);
-
-		CompleteSndBufIdx += nGeneratedSamples;
-		nGeneratedSamples = 0;
-	}
-
-	CompleteSndBufIdx = CompleteSndBufIdx % MIXBUFFER_SIZE;
-}
-#endif
-
 
 
 /*-----------------------------------------------------------------------*/
@@ -1525,24 +2059,13 @@ void Sound_Update_VBL(void)
 	Sound_Update(true);					/* generate as many samples as needed to fill this VBL */
 //fprintf ( stderr , "vbl done %d %d\n" , SamplesPerFrame , CurrentSamplesNb );
 
-#ifdef __LIBRETRO__
-memset(SNDBUF,0,1024*4);
-Retro_Audio_CallBack(CurrentSamplesNb*4);
-#endif
-
 	CurrentSamplesNb = 0;					/* VBL is complete, reset counter for next VBL */
 
 	/*Compute a fractional equivalent of SamplesPerFrame for the next VBL, to avoid rounding propagation */
-	//SamplesPerFrame_unrounded += (yms64) ClocksTimings_GetSamplesPerVBL ( ConfigureParams.System.nMachineType ,
-	//		nScreenRefreshRate , nAudioFrequency );
-	//SamplesPerFrame = SamplesPerFrame_unrounded >> 28;		/* use integer part */
-	//SamplesPerFrame_unrounded &= 0x0fffffff;			/* keep fractional part in the lower 28 bits */
-
-	// Hatari's audio system seems to be able to deal with a variable number of samples per frame, keeping aligned with the Atari's not-quite-50/60 Hz,
-	// but our RetroArch interface does not seem to be able to handle it (pads with 0 to fill the rest, creating a constant buzz).
-	// Forcing it to generate all samples every frame:
-	SamplesPerFrame = nAudioFrequency / nScreenRefreshRate;
-	SamplesPerFrame_unrounded = 0;
+	SamplesPerFrame_unrounded += (yms64) ClocksTimings_GetSamplesPerVBL ( ConfigureParams.System.nMachineType ,
+			nScreenRefreshRate , nAudioFrequency );
+	SamplesPerFrame = SamplesPerFrame_unrounded >> 28;		/* use integer part */
+	SamplesPerFrame_unrounded &= 0x0fffffff;			/* keep fractional part in the lower 28 bits */
 
 	/* Reset sound buffer if needed (after pause, fast forward, slow system, ...) */
 	if ( Sound_BufferIndexNeedReset )

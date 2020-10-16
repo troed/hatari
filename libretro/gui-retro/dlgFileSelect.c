@@ -615,7 +615,8 @@ char* SDLGui_FileSelect(const char *title,const char *path_and_name, char **zip_
 		}
 
 		/* Show dialog: */
-		retbut = SDLGui_DoDialog(fsdlg, &sdlEvent);
+/* Troed: Current hatari reuses the dialog here - source need updating */
+		retbut = SDLGui_DoDialog(fsdlg, &sdlEvent, false);
 
 		/* Has the user clicked on a file or folder? */
 		if (retbut>=SGFSDLG_ENTRYFIRST && retbut<=SGFSDLG_ENTRYLAST && retbut-SGFSDLG_ENTRYFIRST+ypos<entries)

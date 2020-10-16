@@ -10,7 +10,7 @@
   the changes are done, these are compared to see whether emulator
   needs to be rebooted
 */
-const char Change_fileid[] = "Hatari change.c : " __DATE__ " " __TIME__;
+const char Change_fileid[] = "Hatari change.c";
 
 #include <ctype.h>
 #include "main.h"
@@ -28,10 +28,12 @@ const char Change_fileid[] = "Hatari change.c : " __DATE__ " " __TIME__;
 #include "keymap.h"
 #include "m68000.h"
 #include "midi.h"
+#include "ncr5380.h"
 #include "options.h"
 #include "printer.h"
 #include "reset.h"
 #include "rs232.h"
+#include "scc.h"
 #include "screen.h"
 #include "sound.h"
 #include "statusbar.h"
@@ -45,9 +47,9 @@ const char Change_fileid[] = "Hatari change.c : " __DATE__ " " __TIME__;
 
 #define DEBUG 0
 #if DEBUG
-#define Dprintf(a...) printf(a)
+#define Dprintf(...) printf(__VA_ARGS__)
 #else
-#define Dprintf(a...)
+#define Dprintf(...)
 #endif
 
 /*-----------------------------------------------------------------------*/
@@ -90,18 +92,27 @@ bool Change_DoNeedReset(CNF_PARAMS *current, CNF_PARAMS *changed)
 			return true;
 	}
 
-	/* Did change IDE master hard disk image? */
-	if (changed->HardDisk.bUseIdeMasterHardDiskImage != current->HardDisk.bUseIdeMasterHardDiskImage
-	    || strcmp(changed->HardDisk.szIdeMasterHardDiskImage, current->HardDisk.szIdeMasterHardDiskImage))
-		return true;
+	/* Did change SCSI hard disk image? */
+	for (i = 0; i < MAX_SCSI_DEVS; i++)
+	{
+		if (changed->Scsi[i].bUseDevice != current->Scsi[i].bUseDevice
+		    || (strcmp(changed->Scsi[i].sDeviceFile, current->Scsi[i].sDeviceFile)
+		        && changed->Scsi[i].bUseDevice))
+			return true;
+	}
 
-	/* Did change IDE slave hard disk image? */
-	if (changed->HardDisk.bUseIdeSlaveHardDiskImage != current->HardDisk.bUseIdeSlaveHardDiskImage
-	    || strcmp(changed->HardDisk.szIdeSlaveHardDiskImage, current->HardDisk.szIdeSlaveHardDiskImage))
-		return true;
+	/* Did change IDE hard disk image? */
+	for (i = 0; i < MAX_IDE_DEVS; i++)
+	{
+		if (changed->Ide[i].bUseDevice != current->Ide[i].bUseDevice
+		    || changed->Ide[i].nByteSwap != current->Ide[i].nByteSwap
+		    || (strcmp(changed->Ide[i].sDeviceFile, current->Ide[i].sDeviceFile)
+		        && changed->Ide[i].bUseDevice))
+			return true;
+	}
 
 	/* Did change GEMDOS drive Atari/host location or enabling? */
-	if (changed->HardDisk.nHardDiskDrive != current->HardDisk.nHardDiskDrive
+	if (changed->HardDisk.nGemdosDrive != current->HardDisk.nGemdosDrive
 	    || changed->HardDisk.bUseHardDiskDirectories != current->HardDisk.bUseHardDiskDirectories
 	    || (strcmp(changed->HardDisk.szHardDiskDirectories[0], current->HardDisk.szHardDiskDirectories[0])
 	        && changed->HardDisk.bUseHardDiskDirectories))
@@ -146,10 +157,14 @@ bool Change_DoNeedReset(CNF_PARAMS *current, CNF_PARAMS *changed)
 	/* Did change FPU? */
 	if (changed->System.n_FPUType != current->System.n_FPUType)
 		return true;
+
+	/* Did change size of TT-RAM? */
+	if (current->Memory.TTRamSize_KB != changed->Memory.TTRamSize_KB)
+		return true;
 #endif
 
 	/* Did change size of memory? */
-	if (current->Memory.nMemorySize != changed->Memory.nMemorySize)
+	if (current->Memory.STRamSize_KB != changed->Memory.STRamSize_KB)
 		return true;
 
 	/* MIDI related IRQs start/stop needs reset */
@@ -168,7 +183,8 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 {
 	bool NeedReset;
 	bool bReInitGemdosDrive = false;
-	bool bReInitAcsiEmu = false;
+	bool bReInitScsiEmu = false;
+	bool bReInitHdcEmu = false;
 	bool bReInitIDEEmu = false;
 	bool bReInitIoMem = false;
 	bool bScreenModeChange = false;
@@ -193,7 +209,13 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 	     || changed->Screen.nMaxWidth != current->Screen.nMaxWidth
 	     || changed->Screen.nMaxHeight != current->Screen.nMaxHeight
 	     || changed->Screen.bAllowOverscan != current->Screen.bAllowOverscan
-	     || changed->Screen.bShowStatusbar != current->Screen.bShowStatusbar))
+	     || changed->Screen.bShowStatusbar != current->Screen.bShowStatusbar
+#if WITH_SDL2
+	     || changed->Screen.bUseSdlRenderer != current->Screen.bUseSdlRenderer
+	     || changed->Screen.bResizable != current->Screen.bResizable
+	     || changed->Screen.bUseVsync != current->Screen.bUseVsync
+#endif
+	    ))
 	{
 		Dprintf("- screenmode>\n");
 		bScreenModeChange = true;
@@ -215,6 +237,16 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 	{
 		Dprintf("- RS-232>\n");
 		RS232_UnInit();
+	}
+
+	/* Did set new SCC parameters? */
+	if (changed->RS232.bEnableSccB != current->RS232.bEnableSccB
+	    || strcmp(changed->RS232.sSccBInFileName, current->RS232.sSccBInFileName)
+	    || strcmp(changed->RS232.sSccBOutFileName, current->RS232.sSccBOutFileName)
+	    || (SCC_IsAvailable(current) && !SCC_IsAvailable(changed)))
+	{
+		Dprintf("- SCC>\n");
+		SCC_UnInit();
 	}
 
 	/* Did stop sound? Or change playback Hz. If so, also stop sound recording */
@@ -254,7 +286,7 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 		FDC_Drive_Set_NumberOfHeads ( 1 , changed->DiskImage.DriveB_NumberOfHeads );
 
 	/* Did change GEMDOS drive Atari/host location or enabling? */
-	if (changed->HardDisk.nHardDiskDrive != current->HardDisk.nHardDiskDrive
+	if (changed->HardDisk.nGemdosDrive != current->HardDisk.nGemdosDrive
 	    || changed->HardDisk.bUseHardDiskDirectories != current->HardDisk.bUseHardDiskDirectories
 	    || (strcmp(changed->HardDisk.szHardDiskDirectories[0], current->HardDisk.szHardDiskDirectories[0])
 	        && changed->HardDisk.bUseHardDiskDirectories))
@@ -264,7 +296,7 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 		bReInitGemdosDrive = true;
 	}
 
-	/* Did change ACSI image? */
+	/* Did change ACSI images? */
 	for (i = 0; i < MAX_ACSI_DEVS; i++)
 	{
 		if (changed->Acsi[i].bUseDevice != current->Acsi[i].bUseDevice
@@ -272,41 +304,49 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 		        && changed->Acsi[i].bUseDevice))
 		{
 			Dprintf("- ACSI image %i>\n", i);
-			bReInitAcsiEmu = true;
+			bReInitHdcEmu = true;
 		}
 	}
-	if (bReInitAcsiEmu)
+	if (bReInitHdcEmu)
 		HDC_UnInit();
 
-	/* Did change IDE HD master image? */
-	if (changed->HardDisk.bUseIdeMasterHardDiskImage != current->HardDisk.bUseIdeMasterHardDiskImage
-	    || (strcmp(changed->HardDisk.szIdeMasterHardDiskImage, current->HardDisk.szIdeMasterHardDiskImage)
-	        && changed->HardDisk.bUseIdeMasterHardDiskImage))
+	/* Did change SCSI images? */
+	for (i = 0; i < MAX_SCSI_DEVS; i++)
 	{
-		Dprintf("- IDE master>\n");
-		Ide_UnInit();
-		bReInitIDEEmu = true;
+		if (changed->Scsi[i].bUseDevice != current->Scsi[i].bUseDevice
+		    || (strcmp(changed->Scsi[i].sDeviceFile, current->Scsi[i].sDeviceFile)
+		        && changed->Scsi[i].bUseDevice))
+		{
+			Dprintf("- SCSI image %i>\n", i);
+			bReInitScsiEmu = true;
+		}
 	}
+	if (bReInitScsiEmu)
+		Ncr5380_UnInit();
 
-	/* Did change IDE HD slave image? */
-	if (changed->HardDisk.bUseIdeSlaveHardDiskImage != current->HardDisk.bUseIdeSlaveHardDiskImage
-	    || (strcmp(changed->HardDisk.szIdeSlaveHardDiskImage, current->HardDisk.szIdeSlaveHardDiskImage)
-	        && changed->HardDisk.bUseIdeSlaveHardDiskImage))
+	/* Did change IDE HD images or their settings? */
+	for (i = 0; i < MAX_IDE_DEVS; i++)
 	{
-		Dprintf("- IDE slave>\n");
-		Ide_UnInit();
-		bReInitIDEEmu = true;
+		if (changed->Ide[i].bUseDevice != current->Ide[i].bUseDevice
+		    || changed->Ide[i].nByteSwap != current->Ide[i].nByteSwap
+		    || (strcmp(changed->Ide[i].sDeviceFile, current->Ide[i].sDeviceFile)
+		        && changed->Ide[i].bUseDevice))
+		{
+			Dprintf("- IDE image %i>\n", i);
+			bReInitIDEEmu = true;
+		}
 	}
+	if (bReInitIDEEmu)
+		Ide_UnInit();
 
-	/* Did change blitter, rtc or system type? */
+	/* Did change blitter, DSP or system type? */
 	if (changed->System.bBlitter != current->System.bBlitter
 #if ENABLE_DSP_EMU
 	    || changed->System.nDSPType != current->System.nDSPType
 #endif
-	    || changed->System.bRealTimeClock != current->System.bRealTimeClock
 	    || changed->System.nMachineType != current->System.nMachineType)
 	{
-		Dprintf("- blitter/rtc/dsp/machine>\n");
+		Dprintf("- blitter/dsp/machine>\n");
 		IoMem_UnInit();
 		bReInitIoMem = true;
 	}
@@ -317,15 +357,20 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 	    changed->System.nDSPType != DSP_TYPE_EMU)
 	{
 		Dprintf("- DSP>\n");
-		DSP_UnInit();
+		DSP_Disable();
 	}
 #endif
 
 	/* Did change MIDI settings? */
 	if (current->Midi.bEnableMidi != changed->Midi.bEnableMidi
-	    || ((strcmp(changed->Midi.sMidiOutFileName, current->Midi.sMidiOutFileName)
-	         || strcmp(changed->Midi.sMidiInFileName, current->Midi.sMidiInFileName))
-	        && changed->Midi.bEnableMidi))
+#ifdef HAVE_PORTMIDI
+	    || strcmp(changed->Midi.sMidiOutPortName, current->Midi.sMidiOutPortName)
+	    || strcmp(changed->Midi.sMidiInPortName, current->Midi.sMidiInPortName)
+#else
+	    || strcmp(changed->Midi.sMidiOutFileName, current->Midi.sMidiOutFileName)
+	    || strcmp(changed->Midi.sMidiInFileName, current->Midi.sMidiInFileName)
+#endif
+	    )
 	{
 		Dprintf("- midi>\n");
 		Midi_UnInit();
@@ -348,7 +393,7 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 	    changed->System.nDSPType == DSP_TYPE_EMU)
 	{
 		Dprintf("- DSP<\n");
-		DSP_Init();
+		DSP_Enable();
 	}
 #endif
 
@@ -359,15 +404,20 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 		Keymap_LoadRemapFile(ConfigureParams.Keyboard.szMappingFileName);
 	}
 
-	/* Mount a new HD image: */
-	if (bReInitAcsiEmu)
+	/* Mount new ACSI HD images: */
+	if (bReInitHdcEmu)
 	{
-		Dprintf("- HD<\n");
+		Dprintf("- ACSI<\n");
 		HDC_Init();
 	}
-
-	/* Mount a new IDE HD master or slave image: */
-	if (bReInitIDEEmu && (ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage || ConfigureParams.HardDisk.bUseIdeSlaveHardDiskImage))
+	/* Mount new SCSI HD images: */
+	if (bReInitScsiEmu)
+	{
+		Dprintf("- SCSI<\n");
+		Ncr5380_Init();
+	}
+	/* Mount new IDE HD images: */
+	if (bReInitIDEEmu && Ide_IsAvailable())
 	{
 		Dprintf("- IDE<\n");
 		Ide_Init();
@@ -404,6 +454,13 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 		RS232_Init();
 	}
 
+	/* Re-initialize the SCC emulation: */
+	if (ConfigureParams.RS232.bEnableSccB)
+	{
+		Dprintf("- SCC<\n");
+		SCC_Init();
+	}
+
 	/* Re-init IO memory map? */
 	if (bReInitIoMem)
 	{
@@ -429,7 +486,7 @@ void Change_CopyChangedParamsToConfiguration(CNF_PARAMS *current, CNF_PARAMS *ch
 	if (bScreenModeChange)
 	{
 		Dprintf("- screenmode<\n");
-		Screen_ModeChanged();
+		Screen_ModeChanged(true);
 	}
 
 	/* Do we need to perform reset? */

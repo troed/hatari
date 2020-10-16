@@ -1,17 +1,15 @@
 /*
  * Hatari - natfeats.c
  * 
- * Copyright (C) 2012-2014 by Eero Tamminen
+ * Copyright (C) 2012-2016, 2019 by Eero Tamminen
  *
  * This file is distributed under the GNU General Public License, version 2
  * or at your option any later version. Read the file gpl.txt for details.
  *
  * natfeats.c - Hatari Native features identification and call forwarding,
- * modeled after similar code in Aranym (written by Petr Stehlik),
- * specified here:
- * 	http://wiki.aranym.org/natfeats/proposal
+ * modeled after similar code in Aranym.  See tests/natfeats/ for more info.
  */
-const char Natfeats_fileid[] = "Hatari natfeats.c : " __DATE__ " " __TIME__;
+const char Natfeats_fileid[] = "Hatari natfeats.c";
 
 #include <stdio.h>
 #include "main.h"
@@ -19,10 +17,15 @@ const char Natfeats_fileid[] = "Hatari natfeats.c : " __DATE__ " " __TIME__;
 #include "configuration.h"
 #include "stMemory.h"
 #include "m68000.h"
+#include "reset.h"
 #include "natfeats.h"
-#include "control.h"
+#include "debugui.h"
+#include "statusbar.h"
+#include "nf_scsidrv.h"
 #include "log.h"
 
+/* maximum input string length */
+#define NF_MAX_STRING 4096
 
 /* whether to allow XBIOS(255) style
  * Hatari command line parsing with "command" NF
@@ -40,11 +43,51 @@ const char Natfeats_fileid[] = "Hatari natfeats.c : " __DATE__ " " __TIME__;
  */
 
 /**
+ * Check whether given string address is valid
+ * and whether strings is of "reasonable" length.
+ *
+ * Returns string length or zero for error.
+ */
+static int mem_string_ok(Uint32 addr)
+{
+	const char *buf;
+	int i;
+
+	if (!STMemory_CheckAreaType(addr, 1, ABFLAG_RAM | ABFLAG_ROM)) {
+		/* invalid starting address -> error */
+		M68000_BusError(addr, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
+		return 0;
+	}
+	buf = (const char *)STMemory_STAddrToPointer(addr);
+	if (STMemory_CheckAreaType(addr, NF_MAX_STRING, ABFLAG_RAM | ABFLAG_ROM)) {
+		/* valid area -> return length */
+		for (i = 0; i < NF_MAX_STRING; i++) {
+			if (!buf[i]) {
+				return i;
+			}
+		}
+		return 0;
+	}
+	for (i = 0; i < NF_MAX_STRING; i++) {
+		if (!STMemory_CheckAreaType(addr, 1, ABFLAG_RAM | ABFLAG_ROM)) {
+			/* ends in invalid area -> error */
+			M68000_BusError(addr, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
+			return 0;
+		}
+		if (!buf[i]) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+/**
  * NF_NAME - emulator name
  * Stack arguments are:
  * - pointer to buffer for emulator name, and
  * - uint32_t for its size
- * If subid is set, emulator name includes also version information
+ * subid == 1 -> emulator name includes also version information.
+ * Returns length of the name
  */
 static bool nf_name(Uint32 stack, Uint32 subid, Uint32 *retval)
 {
@@ -56,16 +99,16 @@ static bool nf_name(Uint32 stack, Uint32 subid, Uint32 *retval)
 	len = STMemory_ReadLong(stack + SIZE_LONG);
 	LOG_TRACE(TRACE_NATFEATS, "NF_NAME[%d](0x%x, %d)\n", subid, ptr, len);
 
-	if (!STMemory_ValidArea(ptr, len)) {
-		M68000_BusError(ptr, BUS_ERROR_WRITE);
+	if ( !STMemory_CheckAreaType ( ptr, len, ABFLAG_RAM | ABFLAG_ROM ) ) {
+		M68000_BusError(ptr, BUS_ERROR_WRITE, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return false;
 	}
-	if (subid) {
+	if (subid == 1) {
 		str = PROG_NAME;
 	} else {
 		str = "Hatari";
 	}
-	buf = (char *)STRAM_ADDR(ptr);
+	buf = (char *)STMemory_STAddrToPointer ( ptr );
 	*retval = snprintf(buf, len, "%s", str);
 	return true;
 }
@@ -85,6 +128,7 @@ static bool nf_version(Uint32 stack, Uint32 subid, Uint32 *retval)
  * NF_STDERR - print string to stderr
  * Stack arguments are:
  * - pointer to buffer containing the string
+ * Returns printed string length
  */
 static bool nf_stderr(Uint32 stack, Uint32 subid, Uint32 *retval)
 {
@@ -94,25 +138,54 @@ static bool nf_stderr(Uint32 stack, Uint32 subid, Uint32 *retval)
 	ptr = STMemory_ReadLong(stack);
 	LOG_TRACE(TRACE_NATFEATS, "NF_STDERR(0x%x)\n", ptr);
 
-	if (!STMemory_ValidArea(ptr, 1)) {
-		M68000_BusError(ptr, BUS_ERROR_READ);
+	*retval = 0;
+	if (subid) {
+		/* unrecognized subid, nothing printed */
+		return true;
+	}
+	if (!mem_string_ok(ptr)) {
 		return false;
 	}
-	str = (const char *)STRAM_ADDR(ptr);
+	str = (const char *)STMemory_STAddrToPointer (ptr);
 	*retval = fprintf(stderr, "%s", str);
 	fflush(stderr);
 	return true;
 }
 
 /**
- * NF_SHUTDOWN - exit emulator normally
+ * NF_SHUTDOWN - reset or exit emulator
+ *
  * Needs to be called from supervisor mode
  */
 static bool nf_shutdown(Uint32 stack, Uint32 subid, Uint32 *retval)
 {
-	LOG_TRACE(TRACE_NATFEATS, "NF_SHUTDOWN()\n");
-	ConfigureParams.Log.bConfirmQuit = false;
-	Main_RequestQuit(0);
+	const char *msg;
+
+	LOG_TRACE(TRACE_NATFEATS, "NF_SHUTDOWN[%d]()\n", subid);
+	switch (subid) {
+	case 1:	/* warm reset */
+		msg = "warm reset";
+		Reset_Warm();
+		/* Some infos can change after 'reset' */
+		Statusbar_UpdateInfo();
+		break;
+	case 2:	/* cold reset (clear all) */
+		msg = "cold reset";
+		Reset_Cold();
+		/* Some infos can change after 'reset' */
+		Statusbar_UpdateInfo();
+		break;
+	case 0: /* shutdown */
+	case 3: /* poweroff */
+		msg = "poweroff";
+		ConfigureParams.Log.bConfirmQuit = false;
+		Main_RequestQuit(0);
+		break;
+	default:
+		/* unrecognized subid -> no-op */
+		return true;
+	}
+	fprintf(stderr, "NatFeats: %s\n", msg);
 	return true;
 }
 
@@ -133,6 +206,7 @@ static bool nf_exit(Uint32 stack, Uint32 subid, Uint32 *retval)
 	exitval = STMemory_ReadLong(stack);
 	LOG_TRACE(TRACE_NATFEATS, "NF_EXIT(%d)\n", exitval);
 	Main_RequestQuit(exitval);
+	fprintf(stderr, "NatFeats: exit(%d)\n", exitval);
 	return true;
 }
 
@@ -142,7 +216,7 @@ static bool nf_exit(Uint32 stack, Uint32 subid, Uint32 *retval)
 static bool nf_debugger(Uint32 stack, Uint32 subid, Uint32 *retval)
 {
 	LOG_TRACE(TRACE_NATFEATS, "NF_DEBUGGER()\n");
-	M68000_SetSpecial(SPCFLAG_DEBUGGER);
+	DebugUI(REASON_PROGRAM);
 	return true;
 }
 
@@ -150,13 +224,19 @@ static bool nf_debugger(Uint32 stack, Uint32 subid, Uint32 *retval)
  * NF_FASTFORWARD - set fast forward state
  * Stack arguments are:
  * - state 0: off, >=1: on
+ * Returns previous fast-forward value
  */
 static bool nf_fastforward(Uint32 stack, Uint32 subid, Uint32 *retval)
 {
 	Uint32 val;
 
-	val = STMemory_ReadLong(stack);
 	*retval = ConfigureParams.System.bFastForward;
+	if (subid) {
+		/* unrecognized sub id -> no-op */
+		val = *retval;
+	} else {
+		val = STMemory_ReadLong(stack);
+	}
 	LOG_TRACE(TRACE_NATFEATS, "NF_FASTFORWARD(%d -> %d)\n", *retval, val);
 	ConfigureParams.System.bFastForward = ( val ? true : false );
 	return true;
@@ -173,15 +253,16 @@ static bool nf_command(Uint32 stack, Uint32 subid, Uint32 *retval)
 	const char *buffer;
 	Uint32 ptr;
 
+	if (subid) {
+		/* unrecognized sub id -> no-op */
+		return true;
+	}
 	ptr = STMemory_ReadLong(stack);
-
-	if (!STMemory_ValidArea(ptr, 1)) {
-		M68000_BusError(ptr, BUS_ERROR_READ);
+	if (!mem_string_ok(ptr)) {
 		return false;
 	}
-	buffer = (const char *)STRAM_ADDR(ptr);
+	buffer = (const char *)STMemory_STAddrToPointer(ptr);
 	LOG_TRACE(TRACE_NATFEATS, "NF_COMMAND(0x%x \"%s\")\n", ptr, buffer);
-
 	Control_ProcessBuffer(buffer);
 	return true;
 }
@@ -206,6 +287,9 @@ static const struct {
 	{ "NF_EXIT",     false, nf_exit },
 	{ "NF_DEBUGGER", false, nf_debugger },
 	{ "NF_FASTFORWARD", false,  nf_fastforward }
+#if defined(__linux__)        
+        ,{ "NF_SCSIDRV",  true, nf_scsidrv }
+#endif
 };
 
 /* macros from Aranym */
@@ -229,15 +313,15 @@ bool NatFeat_ID(Uint32 stack, Uint32 *retval)
 	int i;
 
 	ptr = STMemory_ReadLong(stack);
-	if (!STMemory_ValidArea(ptr, FEATNAME_MAX)) {
-		M68000_BusError(ptr, BUS_ERROR_READ);
+	if ( !STMemory_CheckAreaType ( ptr, FEATNAME_MAX, ABFLAG_RAM | ABFLAG_ROM ) ) {
+		M68000_BusError(ptr, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return false;
 	}
 
-	name = (const char *)STRAM_ADDR(ptr);
+	name = (const char *)STMemory_STAddrToPointer ( ptr );
 	LOG_TRACE(TRACE_NATFEATS, "NF ID(0x%x \"%s\")\n", ptr, name);
 
-	for (i = 0; i < ARRAYSIZE(features); i++) {
+	for (i = 0; i < ARRAY_SIZE(features); i++) {
 		if (strcmp(features[i].name, name) == 0) {
 			*retval = IDX2MASTERID(i);
 			return true;
@@ -261,13 +345,17 @@ bool NatFeat_Call(Uint32 stack, bool super, Uint32 *retval)
 	unsigned int idx = MASTERID2IDX(subid);
 	subid = MASKOUTMASTERID(subid);
 
-	if (idx >= ARRAYSIZE(features)) {
+	if (idx >= ARRAY_SIZE(features)) {
 		LOG_TRACE(TRACE_NATFEATS, "ERROR: invalid NF ID %d requested\n", idx);
 		return true; /* undefined */
 	}
 	if (features[idx].super && !super) {
 		LOG_TRACE(TRACE_NATFEATS, "ERROR: NF function %d called without supervisor mode\n", idx);
-		Exception(8, 0, M68000_EXC_SRC_CPU);
+#ifndef WINUAE_FOR_HATARI
+		M68000_Exception(8, M68000_EXC_SRC_CPU);
+#else
+		M68000_Exception(8, M68000_EXC_SRC_CPU);
+#endif
 		return false;
 	}
 	stack += SIZE_LONG;

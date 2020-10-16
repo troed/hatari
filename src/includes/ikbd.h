@@ -58,12 +58,12 @@ typedef struct {
   int bLButtonDown,bRButtonDown;                /* Mouse states in emulation system, BUTTON_xxxx */
   int bOldLButtonDown,bOldRButtonDown;
   int LButtonDblClk,RButtonDblClk;
-  int LButtonHistory,RButtonHistory;
+  unsigned int LButtonHistory, RButtonHistory;
 
   int AutoSendCycles;				/* Number of cpu cycles to call INTERRUPT_IKBD_AUTOSEND */
 } KEYBOARD;
 
-/* Button states, a bit mask so can mimick joystick/right mouse button duplication */
+/* Button states, a bit mask so can mimic joystick/right mouse button duplication */
 #define BUTTON_NULL      0x00     /* Button states, so can OR together mouse/joystick buttons */
 #define BUTTON_MOUSE     0x01
 #define BUTTON_JOYSTICK  0x02
@@ -94,7 +94,8 @@ extern void IKBD_InterruptHandler_AutoSend(void);
 
 extern void IKBD_UpdateClockOnVBL ( void );
 
-
 extern void IKBD_PressSTKey(Uint8 ScanCode, bool bPress);
+
+extern void IKBD_Info(FILE *fp, Uint32 dummy);
 
 #endif  /* HATARI_IKBD_H */

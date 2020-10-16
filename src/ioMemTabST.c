@@ -8,16 +8,17 @@
 */
 
 /* 2007/04/29	[NP]	Functions PSG_Void_WriteByte and PSG_Void_ReadByte to handle	*/
-/*			accesses to $ff8801/03. These adresses have no effect, but they	*/
-/*			give some wait states (e.g. move.l d0,ff8800). 			*/
+/*			accesses to $ff8801/03. These addresses have no effect, but	*/
+/*			they give some wait states (e.g. move.l d0,ff8800). 		*/
 /* 2007/12/16	[NP]	0xff820d/0xff820f are only available on STE, not on ST. We call	*/
 /*			IoMem_VoidRead and IoMem_VoidWrite for these addresses.		*/
 /* 2008/12/21	[NP]	Change functions used to access 0xff88xx (see psg.c)		*/
 
 
-const char IoMemTabST_fileid[] = "Hatari ioMemTabST.c : " __DATE__ " " __TIME__;
+const char IoMemTabST_fileid[] = "Hatari ioMemTabST.c";
 
 #include "main.h"
+#include "configuration.h"
 #include "dmaSnd.h"
 #include "fdc.h"
 #include "acia.h"
@@ -32,6 +33,7 @@ const char IoMemTabST_fileid[] = "Hatari ioMemTabST.c : " __DATE__ " " __TIME__;
 #include "screen.h"
 #include "video.h"
 #include "blitter.h"
+#include "stMemory.h"
 
 
 /*-----------------------------------------------------------------------*/
@@ -40,17 +42,16 @@ const char IoMemTabST_fileid[] = "Hatari ioMemTabST.c : " __DATE__ " " __TIME__;
 */
 const INTERCEPT_ACCESS_FUNC IoMemTable_ST[] =
 {
-	{ 0xff8001, SIZE_BYTE, IoMem_ReadWithoutInterception, IoMem_WriteWithoutInterception }, /* Memory configuration */
+	{ 0xff8001, SIZE_BYTE, STMemory_MMU_Config_ReadByte, STMemory_MMU_Config_WriteByte },	/* Memory configuration */
 
-	{ 0xff8201, SIZE_BYTE, IoMem_ReadWithoutInterception, IoMem_WriteWithoutInterception }, /* Video base high byte */
-	{ 0xff8203, SIZE_BYTE, IoMem_ReadWithoutInterception, IoMem_WriteWithoutInterception }, /* Video base med byte */
+	{ 0xff8201, SIZE_BYTE, IoMem_ReadWithoutInterception, Video_ScreenBase_WriteByte },	/* Video base high byte */
+	{ 0xff8203, SIZE_BYTE, IoMem_ReadWithoutInterception, Video_ScreenBase_WriteByte },	/* Video base med byte */
 	{ 0xff8205, SIZE_BYTE, Video_ScreenCounter_ReadByte, IoMem_WriteWithoutInterception },
 	{ 0xff8207, SIZE_BYTE, Video_ScreenCounter_ReadByte, IoMem_WriteWithoutInterception },
 	{ 0xff8209, SIZE_BYTE, Video_ScreenCounter_ReadByte, IoMem_WriteWithoutInterception },
 	{ 0xff820a, SIZE_BYTE, Video_Sync_ReadByte, Video_Sync_WriteByte },
 	{ 0xff820b, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
 	{ 0xff820d, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },
-	{ 0xff820f, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },
 	{ 0xff8240, SIZE_WORD, Video_Color0_ReadWord, Video_Color0_WriteWord },			/* COLOR 0 */
 	{ 0xff8242, SIZE_WORD, Video_Color1_ReadWord, Video_Color1_WriteWord },			/* COLOR 1 */
 	{ 0xff8244, SIZE_WORD, Video_Color2_ReadWord, Video_Color2_WriteWord },			/* COLOR 2 */
@@ -67,7 +68,7 @@ const INTERCEPT_ACCESS_FUNC IoMemTable_ST[] =
 	{ 0xff825a, SIZE_WORD, Video_Color13_ReadWord, Video_Color13_WriteWord },		/* COLOR 13 */
 	{ 0xff825c, SIZE_WORD, Video_Color14_ReadWord, Video_Color14_WriteWord },		/* COLOR 14 */
 	{ 0xff825e, SIZE_WORD, Video_Color15_ReadWord, Video_Color15_WriteWord },		/* COLOR 15 */
-	{ 0xff8260, SIZE_BYTE, Video_ShifterMode_ReadByte, Video_ShifterMode_WriteByte },
+	{ 0xff8260, SIZE_BYTE, Video_Res_ReadByte, Video_Res_WriteByte },
 	{ 0xff8261, 31,        IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus errors here */
 
 	{ 0xff8604, SIZE_WORD, FDC_DiskControllerStatus_ReadWord, FDC_DiskController_WriteWord },
@@ -75,7 +76,6 @@ const INTERCEPT_ACCESS_FUNC IoMemTable_ST[] =
 	{ 0xff8609, SIZE_BYTE, FDC_DmaAddress_ReadByte, FDC_DmaAddress_WriteByte },		/* DMA base and counter high byte */
 	{ 0xff860b, SIZE_BYTE, FDC_DmaAddress_ReadByte, FDC_DmaAddress_WriteByte },		/* DMA base and counter med byte  */
 	{ 0xff860d, SIZE_BYTE, FDC_DmaAddress_ReadByte, FDC_DmaAddress_WriteByte },		/* DMA base and counter low byte  */
-	{ 0xff860f, SIZE_BYTE, IoMem_VoidRead, IoMem_VoidWrite },                               /* No bus error here */
 
 	{ 0xff8800, SIZE_BYTE, PSG_ff8800_ReadByte, PSG_ff8800_WriteByte },
 	{ 0xff8801, SIZE_BYTE, PSG_ff880x_ReadByte, PSG_ff8801_WriteByte },

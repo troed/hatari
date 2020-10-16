@@ -16,7 +16,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License (gpl.txt) for more details.
  */
-const char DlgAlert_fileid[] = "Hatari dlgAlert.c : " __DATE__ " " __TIME__;
+const char DlgAlert_fileid[] = "Hatari dlgAlert.c";
 
 #include <string.h>
 
@@ -24,6 +24,7 @@ const char DlgAlert_fileid[] = "Hatari dlgAlert.c : " __DATE__ " " __TIME__;
 #include "dialog.h"
 #include "screen.h"
 #include "sdlgui.h"
+#include "str.h"
 
 
 #define MAX_LINES 4
@@ -48,8 +49,8 @@ static SGOBJ alertdlg[] =
 	{ SGTEXT, 0, 0, 1,3, 50,1, dlglines[2] },
 	{ SGTEXT, 0, 0, 1,4, 50,1, dlglines[3] },
 	{ SGBUTTON, SG_DEFAULT, 0, 5,5, 8,1, "OK" },
-	{ SGBUTTON, SG_CANCEL, 0, 24,5, 8,1, "Cancel" },
-	{ -1, 0, 0, 0,0, 0,0, NULL }
+	{ SGBUTTON, SG_CANCEL, 0, 24,5, 8,1, NULL },
+	{ SGSTOP, 0, 0, 0,0, 0,0, NULL }
 };
 
 
@@ -125,17 +126,17 @@ static int DlgAlert_FormatTextToBox(char *text, int max_width, int *text_width)
 static int DlgAlert_ShowDlg(const char *text)
 {
 	static int maxlen = sizeof(dlglines[0])-1;
-	char *t = (char *)malloc(strlen(text)+1);
+	char *t = Str_Alloc(strlen(text));
 	char *orig_t = t;
 	int lines, i, len, offset;
 	bool bOldMouseVisibility;
 	int nOldMouseX, nOldMouseY;
+	bool bWasEmuActive;
 
 #if WITH_SDL2
 	bool bOldMouseMode = SDL_GetRelativeMouseMode();
 	SDL_SetRelativeMouseMode(SDL_FALSE);
 #endif
-
 	strcpy(t, text);
 	lines = DlgAlert_FormatTextToBox(t, maxlen, &len);
 	offset = (maxlen-len)/2;
@@ -161,19 +162,24 @@ static int DlgAlert_ShowDlg(const char *text)
 		return false;
 	SDLGui_CenterDlg(alertdlg);
 
+	bWasEmuActive = Main_PauseEmulation(true);
+
 	SDL_GetMouseState(&nOldMouseX, &nOldMouseY);
 	bOldMouseVisibility = SDL_ShowCursor(SDL_QUERY);
 	SDL_ShowCursor(SDL_ENABLE);
 
-	i = SDLGui_DoDialog(alertdlg, NULL);
+	i = SDLGui_DoDialog(alertdlg, NULL, false);
 
 	SDL_UpdateRect(sdlscrn, 0,0, 0,0);
 	SDL_ShowCursor(bOldMouseVisibility);
-	Main_WarpMouse(nOldMouseX, nOldMouseY);
+	Main_WarpMouse(nOldMouseX, nOldMouseY, true);
 
 #if WITH_SDL2
 	SDL_SetRelativeMouseMode(bOldMouseMode);
 #endif
+
+	if (bWasEmuActive)
+		Main_UnPauseEmulation();
 
 	return (i == DLGALERT_OK);
 }

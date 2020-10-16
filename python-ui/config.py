@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Class and helper functions for handling (Hatari) INI style
 # configuration files: loading, saving, setting/getting variables,
@@ -67,22 +66,23 @@ def text_to_value(text):
 # Handle INI style configuration files as used by Hatari
 
 class ConfigStore:
-    def __init__(self, userconfdir, defaults = {}, miss_is_error = True):
+    def __init__(self, confdirs, defaults = {}, miss_is_error = True):
         "ConfigStore(userconfdir, fgfile[,defaults,miss_is_error])"
         self.defaults = defaults
-        self.userpath = self._get_full_userpath(userconfdir)
+        self.userpath = self._get_full_userpath(confdirs)
         self.miss_is_error = miss_is_error
-    
-    def _get_full_userpath(self, leafdir):
+
+    def _get_full_userpath(self, confdirs):
         "get_userpath(leafdir) -> config file default save path from HOME, CWD or their subdir"
         # user's hatari.cfg can be in home or current work dir,
         # current dir is used only if $HOME fails
         for path in (os.getenv("HOME"), os.getenv("HOMEPATH"), os.getcwd()):
             if path and os.path.exists(path) and os.path.isdir(path):
-                if leafdir:
-                    hpath = "%s%c%s" % (path, os.path.sep, leafdir)
-                    if os.path.exists(hpath) and os.path.isdir(hpath):
-                        return hpath
+                for leafdir in confdirs:
+                    if leafdir:
+                        hpath = "%s%c%s" % (path, os.path.sep, leafdir)
+                        if os.path.exists(hpath) and os.path.isdir(hpath):
+                            return hpath
                 return path
         return None
 
@@ -96,7 +96,7 @@ class ConfigStore:
                     return file
         # writing needs path name although it's missing for reading
         return "%s%c%s" % (self.userpath, os.path.sep, filename)
-    
+
     def load(self, path):
         "load(path) -> load given configuration file"
         if os.path.isfile(path):
@@ -125,7 +125,7 @@ class ConfigStore:
     def get_path(self):
         "get_path() -> configuration file path"
         return self.path
-    
+
     def _read(self, path):
         "_read(path) -> (all keys, section2key mappings)"
         print("Reading configuration file '%s'..." % path)
@@ -147,10 +147,12 @@ class ConfigStore:
                     seckeys = {}
                 name = line
                 continue
-            if line.find('=') < 0:
+            offset = line.find('=')
+            if offset < 0:
                 print("WARNING: line without key=value pair:\n%s" % line)
                 continue
-            key, text = [string.strip() for string in line.split('=')]
+            key = line[:offset].strip()
+            text = line[offset+1:].strip()
             seckeys[key] = text_to_value(text)
         if seckeys:
             sections[name] = seckeys
@@ -162,7 +164,7 @@ class ConfigStore:
         for section in self.sections.keys():
             checkpoint[section] = self.sections[section].copy()
         return checkpoint
-    
+
     def get_checkpoint_changes(self, checkpoint):
         "get_checkpoint_changes() -> list of (key, value) pairs for later changes"
         changed = []
@@ -173,13 +175,13 @@ class ConfigStore:
                 for key, value in self.sections[section].items():
                     changed.append((key, value))
                 continue
-            for key, value in self.sections[section].items():                    
+            for key, value in self.sections[section].items():
                 if (key not in checkpoint[section] or
                 value != checkpoint[section][key]):
                     text = value_to_text(key, value)
                     changed.append(("%s.%s" % (section, key), text))
         return changed
-    
+
     def revert_to_checkpoint(self, checkpoint):
         "revert_to_checkpoint(checkpoint), revert to given checkpoint"
         self.sections = checkpoint
@@ -201,7 +203,7 @@ class ConfigStore:
         elif self.sections[section][key] != value:
             self.changed = True
         self.sections[section][key] = value
-        
+
     def is_changed(self):
         "is_changed() -> True if current configuration is changed"
         return self.changed
@@ -209,7 +211,7 @@ class ConfigStore:
     def get_changes(self):
         "get_changes(), return (key, value) list for each changed config option"
         return self.get_checkpoint_changes(self.original)
-    
+
     def write(self, fileobj):
         "write(fileobj), write current configuration to given file object"
         sections = list(self.sections.keys())
@@ -247,7 +249,7 @@ class ConfigStore:
         print("Saved configuration file:", self.path)
         self.changed = False
         return self.path
-    
+
     def save_as(self, path):
         "save_as(path) -> path, save configuration to given file and select it"
         assert(path)

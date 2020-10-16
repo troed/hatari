@@ -1,8 +1,7 @@
-#!/usr/bin/env python
 #
 # Misc common helper classes and functions for the Hatari UI
 #
-# Copyright (C) 2008-2012 by Eero Tamminen
+# Copyright (C) 2008-2019 by Eero Tamminen
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,11 +15,11 @@
 
 import os
 import sys
-# use correct version of pygtk/gtk
-import pygtk
-pygtk.require('2.0')
-import gtk
-import gobject
+import gi
+# use correct version of gtk
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+from gi.repository import GObject
 
 
 # leak debugging
@@ -34,15 +33,16 @@ import gobject
 class UInfo:
     """singleton constants for the UI windows,
     one instance is needed to initialize these properly"""
-    version = "v1.2"
+    version = "v1.4"
     name = "Hatari UI"
-    logo = "hatari.png"
+    logo = "hatari-logo.png"
+    # TODO: use share/icons/hicolor/*/apps/hatari.png instead
     icon = "hatari-icon.png"
-    copyright = "UI copyright (C) 2008-2012 by Eero Tamminen"
+    copyright = "UI copyright (C) 2008-2019 by Eero Tamminen"
 
     # path to the directory where the called script resides
     path = os.path.dirname(sys.argv[0])
-    
+
     def __init__(self, path = None):
         "UIinfo([path]), set suitable paths for resources from CWD and path"
         if path:
@@ -66,7 +66,7 @@ class UIHelp:
     def __init__(self):
         """determine HTML viewer and where docs are"""
         self._view = self.get_html_viewer()
-        self._path = self.get_doc_path()
+        self._path, self._uipath = self.get_doc_path()
 
     def get_html_viewer(self):
         """return name of html viewer or None"""
@@ -77,7 +77,7 @@ class UIHelp:
         if path:
             return path
         return None
-        
+
     def get_binary_path(self, name):
         """return true if given binary is in path"""
         # could also try running the binary with "--version" arg
@@ -99,12 +99,18 @@ class UIHelp:
         sep = os.sep
         path = self.get_binary_path("hatari")
         path = sep.join(path.split(sep)[:-2]) # remove "bin/hatari"
-        path = path + sep + "share" + sep + "doc" + sep + "hatari" + sep
-        if os.path.exists(path + "manual.html"):
-            return path
-        # if not, point to latest Hatari HG version docs
-        print("WARNING: Hatari manual not found at:", path + "manual.html")
-        return "http://hg.tuxfamily.org/mercurialroot/hatari/hatari/raw-file/tip/doc/"
+
+        docpath = path + "/share/doc/hatari/"
+        if not os.path.exists(docpath + "manual.html"):
+            print("WARNING: using Hatari website URLs, Hatari 'manual.html' not found in: %s" % docpath)
+            docpath = "https://hatari.tuxfamily.org/doc/"
+
+        uipath = path + "/share/hatari/hatariui/"
+        if not os.path.exists(uipath + "release-notes.txt"):
+            print("WARNING: Using Hatari UI Git URLs, Hatari UI 'release-notes.txt' not found in: %s" % uipath)
+            uipath = "https://git.tuxfamily.org/hatari/hatari.git/plain/python-ui/"
+
+        return docpath, uipath
 
     def set_mainwin(self, widget):
         self.mainwin = widget
@@ -131,23 +137,26 @@ class UIHelp:
     def view_hatari_releasenotes(self, dummy=None):
         self.view_url(self._path + "release-notes.txt", "Hatari release notes")
 
+    def view_hatariui_releasenotes(self, dummy=None):
+        self.view_url(self._uipath + "release-notes.txt", "Hatari UI release notes")
+
     def view_hatari_todo(self, dummy=None):
         self.view_url(self._path + "todo.txt", "Hatari TODO items")
+
+    def view_hatari_authors(self, dummy=None):
+        self.view_url(self._path + "authors.txt", "Hatari authors")
 
     def view_hatari_mails(self, dummy=None):
         self.view_url("http://hatari.tuxfamily.org/contact.html", "Hatari mailing lists")
 
     def view_hatari_repository(self, dummy=None):
-        self.view_url("http://hg.tuxfamily.org/mercurialroot/hatari/hatari", "latest Hatari changes")
-
-    def view_hatari_authors(self, dummy=None):
-        self.view_url(self._path + "authors.txt", "Hatari authors")
+        self.view_url("https://git.tuxfamily.org/hatari/hatari.git/", "latest Hatari changes")
 
     def view_hatari_page(self, dummy=None):
         self.view_url("http://hatari.tuxfamily.org/", "Hatari home page")
 
     def view_hatariui_page(self, dummy=None):
-        self.view_url("http://koti.mbnet.fi/tammat/hatari/hatari-ui.shtml", "Hatari UI home page")
+        self.view_url("http://eerott.mbnet.fi/hatari/hatari-ui.shtml", "Hatari UI home page")
 
 
 # --------------------------------------------------------
@@ -160,7 +169,7 @@ class HatariTextInsert:
         self.pressed = False
         self.hatari = hatari
         print("OUTPUT '%s'" % text)
-        gobject.timeout_add(100, _text_insert_cb, self)
+        GObject.timeout_add(100, _text_insert_cb, self)
 
 # callback to insert text object to Hatari character at the time
 # (first key down, on next call up), at given interval
@@ -188,7 +197,7 @@ def _text_insert_cb(textobj):
 
 def create_button(label, cb, data = None):
     "create_button(label,cb[,data]) -> button widget"
-    button = gtk.Button(label)
+    button = Gtk.Button(label)
     if data == None:
         button.connect("clicked", cb)
     else:
@@ -197,7 +206,7 @@ def create_button(label, cb, data = None):
 
 def create_toolbutton(stock_id, cb, data = None):
     "create_toolbutton(stock_id,cb[,data]) -> toolbar button with stock icon+label"
-    button = gtk.ToolButton(stock_id)
+    button = Gtk.ToolButton(stock_id)
     if data == None:
         button.connect("clicked", cb)
     else:
@@ -206,7 +215,7 @@ def create_toolbutton(stock_id, cb, data = None):
 
 def create_toggle(label, cb, data = None):
     "create_toggle(label,cb[,data]) -> toggle button widget"
-    button = gtk.ToggleButton(label)
+    button = Gtk.ToggleButton(label)
     if data == None:
         button.connect("toggled", cb)
     else:
@@ -216,84 +225,69 @@ def create_toggle(label, cb, data = None):
 
 # -----------------------------
 # Table dialog helper functions
+#
+# TODO: rewrite to use Gtk.Grid instead of Gtk.Table
 
-def create_table_dialog(parent, title, rows, cols, oktext = gtk.STOCK_APPLY):
+def create_table_dialog(parent, title, rows, cols, oktext = Gtk.STOCK_APPLY):
     "create_table_dialog(parent,title,rows, cols, oktext) -> (table,dialog)"
-    dialog = gtk.Dialog(title, parent,
-        gtk.DIALOG_MODAL | gtk.DIALOG_DESTROY_WITH_PARENT,
-        (oktext,  gtk.RESPONSE_APPLY,
-        gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL))
+    dialog = Gtk.Dialog(title, parent,
+        Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+        (oktext,  Gtk.ResponseType.APPLY,
+        Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL))
 
-    table = gtk.Table(rows, cols)
-    table.set_data("col_offset", 0)
+    table = Gtk.Table(rows, cols)
     table.set_col_spacings(8)
     dialog.vbox.add(table)
     return (table, dialog)
 
-def table_set_col_offset(table, offset):
-    "set column offset for successive table_* ops on given table"
-    table.set_data("col_offset", offset)
-
-def table_add_entry_row(table, row, label, size = None):
-    "table_add_entry_row(table,row,label,[entry size]) -> entry"
+def table_add_entry_row(table, row, col, label, size = None):
+    "table_add_entry_row(table,row,col,label,[entry size]) -> entry"
     # add given label to given row in given table
     # return entry for that line
-    label = gtk.Label(label)
-    align = gtk.Alignment(1) # right aligned
-    align.add(label)
-    col = table.get_data("col_offset")
-    table.attach(align, col, col+1, row, row+1, gtk.FILL)
+    label = Gtk.Label(label=label, halign=Gtk.Align.END)
+    table.attach(label, col, col+1, row, row+1, Gtk.AttachOptions.FILL)
     col += 1
     if size:
-        entry = gtk.Entry(size)
-        entry.set_width_chars(size)
-        align = gtk.Alignment(0) # left aligned (default is centered)
-        align.add(entry)
-        table.attach(align, col, col+1, row, row+1)
+        entry = Gtk.Entry(max_length=size, width_chars=size, halign=Gtk.Align.START)
+        table.attach(entry, col, col+1, row, row+1)
     else:
-        entry = gtk.Entry()
+        entry = Gtk.Entry()
         table.attach(entry, col, col+1, row, row+1)
     return entry
 
-def table_add_widget_row(table, row, label, widget, fullspan = False):
-    "table_add_widget_row(table,row,label,widget) -> widget"
+def table_add_widget_row(table, row, col, label, widget, fullspan = False):
+    "table_add_widget_row(table,row,col,label,widget) -> widget"
     # add given label right aligned to given row in given table
     # add given widget to the right column and returns it
     # return entry for that line
-    if fullspan:
-        col = 0
-    else:
-        col = table.get_data("col_offset")
     if label:
-        label = gtk.Label(label)
-        align = gtk.Alignment(1)
-        align.add(label)
-        table.attach(align, col, col+1, row, row+1, gtk.FILL)
+        if fullspan:
+            lcol = 0
+        else:
+            lcol = col
+        label = Gtk.Label(label=label, halign=Gtk.Align.END)
+        table.attach(label, lcol, lcol+1, row, row+1, Gtk.AttachOptions.FILL)
     if fullspan:
-        col = table.get_data("col_offset")
         table.attach(widget, 1, col+2, row, row+1)
     else:
         table.attach(widget, col+1, col+2, row, row+1)
     return widget
 
-def table_add_radio_rows(table, row, label, texts, cb = None):
-    "table_add_radio_rows(table,row,label,texts[,cb]) -> [radios]"
+def table_add_radio_rows(table, row, col, label, texts, cb = None):
+    "table_add_radio_rows(table,row,col,label,texts[,cb]) -> [radios]"
     # - add given label right aligned to given row in given table
     # - create/add radio buttons with given texts to next row, set
     #   the one given as "active" as active and set 'cb' as their
     #   "toggled" callback handler
     # - return array or radiobuttons
-    label = gtk.Label(label)
-    align = gtk.Alignment(1)
-    align.add(label)
-    col = table.get_data("col_offset")
-    table.attach(align, col, col+1, row, row+1, gtk.FILL)
+    label = Gtk.Label(label=label, halign=Gtk.Align.END)
+    table.attach(label, col, col+1, row, row+1)
 
     radios = []
     radio = None
-    box = gtk.VBox()
+    box = Gtk.VBox()
     for text in texts:
-        radio = gtk.RadioButton(radio, text)
+        radio = Gtk.RadioButton(group=radio, label=text)
         if cb:
             radio.connect("toggled", cb, text)
         radios.append(radio)
@@ -303,22 +297,22 @@ def table_add_radio_rows(table, row, label, texts, cb = None):
 
 def table_add_separator(table, row):
     "table_add_separator(table,row)"
-    widget = gtk.HSeparator()
-    endcol = table.get_data("n-columns")
+    widget = Gtk.HSeparator()
+    endcol = table.get_property("n-columns")
     # separator for whole table width
-    table.attach(widget, 0, endcol, row, row+1, gtk.FILL)
+    table.attach(widget, 0, endcol, row, row+1, Gtk.AttachOptions.FILL)
 
 
 # -----------------------------
 # File selection helpers
 
 def get_open_filename(title, parent, path = None):
-    buttons = (gtk.STOCK_OK, gtk.RESPONSE_OK, gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL)
-    fsel = gtk.FileChooserDialog(title, parent, gtk.FILE_CHOOSER_ACTION_OPEN, buttons)
+    buttons = (Gtk.STOCK_OK, Gtk.ResponseType.OK, Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
+    fsel = Gtk.FileChooserDialog(title, parent, Gtk.FileChooserAction.OPEN, buttons)
     fsel.set_local_only(True)
     if path:
         fsel.set_filename(path)
-    if fsel.run() == gtk.RESPONSE_OK:
+    if fsel.run() == Gtk.ResponseType.OK:
         filename = fsel.get_filename()
     else:
         filename = None
@@ -326,8 +320,8 @@ def get_open_filename(title, parent, path = None):
     return filename
 
 def get_save_filename(title, parent, path = None):
-    buttons = (gtk.STOCK_OK, gtk.RESPONSE_OK, gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL)
-    fsel = gtk.FileChooserDialog(title, parent, gtk.FILE_CHOOSER_ACTION_SAVE, buttons)
+    buttons = (Gtk.STOCK_OK, Gtk.ResponseType.OK, Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
+    fsel = Gtk.FileChooserDialog(title, parent, Gtk.FileChooserAction.SAVE, buttons)
     fsel.set_local_only(True)
     fsel.set_do_overwrite_confirmation(True)
     if path:
@@ -336,7 +330,7 @@ def get_save_filename(title, parent, path = None):
             # above set only folder, this is needed to set
             # the file name when the file doesn't exist
             fsel.set_current_name(os.path.basename(path))
-    if fsel.run() == gtk.RESPONSE_OK:
+    if fsel.run() == Gtk.ResponseType.OK:
         filename = fsel.get_filename()
     else:
         filename = None
@@ -351,7 +345,7 @@ class FselAndEjectFactory:
 
     def get(self, label, path, filename, action):
         "returns file selection button and box having that + eject button"
-        fsel = gtk.FileChooserButton(label)
+        fsel = Gtk.FileChooserButton(label)
         # Hatari cannot access URIs
         fsel.set_local_only(True)
         fsel.set_width_chars(12)
@@ -362,9 +356,9 @@ class FselAndEjectFactory:
             fsel.set_current_folder(path)
         eject = create_button("Eject", self._eject, fsel)
 
-        box = gtk.HBox()
-        box.pack_start(fsel)
-        box.pack_start(eject, False, False)
+        box = Gtk.HBox()
+        box.pack_start(fsel, True, True, 0)
+        box.pack_start(eject, False, False, 0)
         return (fsel, box)
 
     def _eject(self, widget, fsel):
@@ -382,16 +376,16 @@ class FselEntry:
         self._parent = parent
         self._validate = validate
         self._validate_data = data
-        entry = gtk.Entry()
+        entry = Gtk.Entry()
         entry.set_width_chars(12)
         entry.set_editable(False)
-        hbox = gtk.HBox()
+        hbox = Gtk.HBox()
         hbox.add(entry)
         button = create_button("Select...", self._select_file_cb)
-        hbox.pack_start(button, False, False)
+        hbox.pack_start(button, False, False, 0)
         self._entry = entry
         self._hbox = hbox
-    
+
     def _select_file_cb(self, widget):
         fname = self._entry.get_text()
         while True:
@@ -405,10 +399,10 @@ class FselEntry:
                     continue
             self._entry.set_text(fname)
             return
-    
+
     def set_filename(self, fname):
         self._entry.set_text(fname)
-        
+
     def get_filename(self):
         return self._entry.get_text()
 

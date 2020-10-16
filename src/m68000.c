@@ -61,8 +61,18 @@
 /* 2014/05/07	[NP]	In M68000_WaitEClock, use CyclesGlobalClockCounter instead of the VBL video	*/
 /*			counter (else for a given position in a VBL we would always get the same value	*/
 /*			for the E clock).								*/
+/* 2015/02/01	[NP]	When using the new WinUAE's cpu, don't handle MFP/DSP interrupts by calling	*/
+/*			directly Exception(), we must set bit 6 in pendingInterrupts and use the IACK	*/
+/*			sequence to get the exception's vector number.					*/
+/* 2015/02/05	[NP]	For the new WinUAE's cpu, don't use ExceptionSource anymore when calling	*/
+/*			Exception().									*/
+/* 2015/02/11	[NP]	Replace BusErrorPC by regs.instruction_pc, to get similar code to WinUAE's cpu  */
+/* 2015/10/08	[NP]	Add M68000_AddCycles_CE() to handle cycles when running with WinUAE's cpu in	*/
+/*			'cycle exact' mode. In that case, instruction pairing don't have to be handled	*/
+/*			with some tables/heuristics anymore.						*/
 
-const char M68000_fileid[] = "Hatari m68000.c : " __DATE__ " " __TIME__;
+
+const char M68000_fileid[] = "Hatari m68000.c";
 
 #include "main.h"
 #include "configuration.h"
@@ -76,6 +86,12 @@ const char M68000_fileid[] = "Hatari m68000.c : " __DATE__ " " __TIME__;
 #include "savestate.h"
 #include "stMemory.h"
 #include "tos.h"
+#include "falcon/crossbar.h"
+#include "cart.h"
+
+#if ENABLE_DSP_EMU
+#include "dsp.h"
+#endif
 
 #if ENABLE_WINUAE_CPU
 #include "mmu_common.h"
@@ -84,13 +100,13 @@ const char M68000_fileid[] = "Hatari m68000.c : " __DATE__ " " __TIME__;
 /* information about current CPU instruction */
 cpu_instruction_t CpuInstruction;
 
-Uint32 BusErrorAddress;         /* Stores the offending address for bus-/address errors */
-Uint32 BusErrorPC;              /* Value of the PC when bus error occurs */
-bool bBusErrorReadWrite;        /* 0 for write error, 1 for read error */
-int nCpuFreqShift;              /* Used to emulate higher CPU frequencies: 0=8MHz, 1=16MHz, 2=32Mhz */
-int nWaitStateCycles;           /* Used to emulate the wait state cycles of certain IO registers */
+Uint32 BusErrorAddress;		/* Stores the offending address for bus-/address errors */
+bool bBusErrorReadWrite;	/* 0 for write error, 1 for read error */
+int nCpuFreqShift;		/* Used to emulate higher CPU frequencies: 0=8MHz, 1=16MHz, 2=32Mhz */
+int WaitStateCycles = 0;	/* Used to emulate the wait state cycles of certain IO registers */
 int BusMode = BUS_MODE_CPU;	/* Used to tell which part is owning the bus (cpu, blitter, ...) */
 bool CPU_IACK = false;		/* Set to true during an exception when getting the interrupt's vector number */
+static bool M68000_DebuggerFlag;/* Is debugger enabled or not ? */
 
 int LastOpcodeFamily = i_NOP;	/* see the enum in readcpu.h i_XXX */
 int LastInstrCycles = 0;	/* number of cycles for previous instr. (not rounded to 4) */
@@ -197,6 +213,9 @@ static void M68000_InitPairing(void)
 
 	PairingArray[ i_ADD ][ i_MOVE ] = 1;		/* when using xx(an,dn) addr mode */
 	PairingArray[ i_SUB ][ i_MOVE ] = 1;
+
+	PairingArray[ i_ABCD ][ i_DBcc ] = 1;
+	PairingArray[ i_SBCD ][ i_DBcc ] = 1;
 }
 
 
@@ -219,16 +238,11 @@ void M68000_Init(void)
  */
 void M68000_Reset(bool bCold)
 {
+//fprintf ( stderr,"M68000_Reset in cold=%d" , bCold );
 #if ENABLE_WINUAE_CPU
-	if (bCold)
-	{
-		/* Clear registers, but we need to keep SPCFLAG_MODE_CHANGE and SPCFLAG_BRK unchanged */
-		int spcFlags = regs.spcflags & (SPCFLAG_MODE_CHANGE | SPCFLAG_BRK);
-		memset(&regs, 0, sizeof(regs));
-		regs.spcflags = spcFlags;
-	}
-	/* Now reset the WINUAE CPU core */
-	m68k_reset(bCold);
+	UAE_Set_Quit_Reset ( bCold );
+	set_special(SPCFLAG_MODE_CHANGE);		/* exit m68k_run_xxx() loop and check for cpu changes / reset / quit */
+
 #else /* UAE CPU core */
 	if (bCold)
 	{
@@ -237,10 +251,43 @@ void M68000_Reset(bool bCold)
 	}
 	/* Now reset the UAE CPU core */
 	m68k_reset();
+	M68000_PatchCpuTables();
 #endif
+
 	BusMode = BUS_MODE_CPU;
 	CPU_IACK = false;
+//fprintf ( stderr,"M68000_Reset out cold=%d\n" , bCold );
 }
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Enable/disable breakpoints in the debugger
+ */
+void M68000_SetDebugger(bool debug)
+{
+	M68000_DebuggerFlag = debug;
+
+	if ( debug )
+		M68000_SetSpecial(SPCFLAG_DEBUGGER);
+	else
+		M68000_UnsetSpecial(SPCFLAG_DEBUGGER);
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Restore debugger state (breakpoints)
+ * This is called from CPU core after a reset, because CPU core clears regs.spcflags
+ */
+void M68000_RestoreDebugger(void)
+{
+	if ( M68000_DebuggerFlag )
+		M68000_SetSpecial(SPCFLAG_DEBUGGER);
+	else
+		M68000_UnsetSpecial(SPCFLAG_DEBUGGER);
+}
+
 
 
 /*-----------------------------------------------------------------------*/
@@ -249,6 +296,8 @@ void M68000_Reset(bool bCold)
  */
 void M68000_Start(void)
 {
+//fprintf (stderr, "M68000_Start\n" );
+
 	/* Load initial memory snapshot */
 	if (bLoadMemorySave)
 	{
@@ -259,33 +308,46 @@ void M68000_Start(void)
 		MemorySnapShot_Restore(ConfigureParams.Memory.szAutoSaveFileName, false);
 	}
 
+#if ENABLE_WINUAE_CPU
+	UAE_Set_Quit_Reset ( false );
 	m68k_go(true);
+#else
+	m68k_go(true);
+#endif
 }
 
 
 /*-----------------------------------------------------------------------*/
 /**
  * Check whether CPU settings have been changed.
+ * Possible values for WinUAE :
+ *	cpu_model : 68000 , 68010, 68020, 68030, 68040, 68060
+ *	cpu_level : not used anymore
+ *	cpu_compatible : 0/false (no prefetch for 68000/20/30)  1/true (prefetch opcode for 68000/20/30)
+ *	cpu_cycle_exact : 0/false   1/true (most accurate, implies cpu_compatible)
+ *	cpu_memory_cycle_exact : 0/false   1/true (less accurate than cpu_cycle_exact)
+ *	cpu_data_cache : 0/false (don't emulate caches)   1/true (emulate instr/data caches for 68020/30/40/60)
+ *	address_space_24 : 1 (68000/10 and 68030 LC for Falcon), 0 (68020/30/40/60)
+ *	fpu_model : 0, 68881 (external), 68882 (external), 68040 (cpu) , 68060 (cpu)
+ *	fpu_strict : true/false (more accurate rounding)
+ *	fpu_mode :  0  faster but less accurate, use host's cpu/fpu with 64 bit precision)
+ *		    1  most accurate but slower, use softfloat library)
+ *		   -1  similar to 0 but with extended 80 bit precision, only for x86 CPU)
+ *		       (TODO [NP] not in Hatari for now, require fpp_native_msvc_80bit.cpp / fpux64_80.asm / fpux86_80.asm)
+ *	mmu_model : 0, 68030, 68040, 68060
+ *
+ *	m68k_speed : -1=don't adjust cycle  >=0 use m68k_speed_throttle to precisely adjust cycles
+ *	m68k_speed_throttle : if not 0, used to set cycles_mult. In Hatari, set it to 0
+ *	cpu_frequency : in CE mode, fine control of cpu freq, set it to freq/2. Not used in Hatari, set it to 0.
+ *	cpu_clock_multiplier : used to speed up/slow down clock by multiple of 2 in CE mode. In Hatari
+ *			we use nCpuFreqShift, so this should always be set to 2<<8 = 512 to get the same
+ *			cpucycleunit as in non CE mode.
+ *	cachesize : size of cache in MB when using JIT. Not used in Hatari at the moment, set it to 0
  */
 void M68000_CheckCpuSettings(void)
 {
-	if (ConfigureParams.System.nCpuFreq < 12)
-	{
-		ConfigureParams.System.nCpuFreq = 8;
-		nCpuFreqShift = 0;
-	}
-	else if (ConfigureParams.System.nCpuFreq > 26)
-	{
-		ConfigureParams.System.nCpuFreq = 32;
-		nCpuFreqShift = 2;
-	}
-	else
-	{
-		ConfigureParams.System.nCpuFreq = 16;
-		nCpuFreqShift = 1;
-	}
+//fprintf ( stderr,"M68000_CheckCpuSettings in\n" );
 	changed_prefs.cpu_level = ConfigureParams.System.nCpuLevel;
-	changed_prefs.cpu_compatible = ConfigureParams.System.bCompatibleCpu;
 
 #if ENABLE_WINUAE_CPU
 	/* WinUAE core uses cpu_model instead of cpu_level, so we've got to
@@ -297,30 +359,153 @@ void M68000_CheckCpuSettings(void)
 		case 3 : changed_prefs.cpu_model = 68030; break;
 		case 4 : changed_prefs.cpu_model = 68040; break;
 		case 5 : changed_prefs.cpu_model = 68060; break;
-		default: fprintf (stderr, "Init680x0() : Error, cpu_level unknown\n");
+		default: fprintf (stderr, "M68000_CheckCpuSettings() : Error, cpu_level unknown\n");
 	}
-	currprefs.cpu_level = changed_prefs.cpu_level;
+	currprefs.cpu_level = changed_prefs.cpu_level;			/* TODO remove, not used anymore */
 
-	changed_prefs.address_space_24 = ConfigureParams.System.bAddressSpace24;
+	/* Only 68040/60 can have 'internal' FPU */
+	if ( ( ConfigureParams.System.n_FPUType == FPU_CPU ) && ( changed_prefs.cpu_model < 68040 ) )
+		ConfigureParams.System.n_FPUType = FPU_NONE;
+
+	/* 68000/10 can't have an FPU */
+	if ( ( ConfigureParams.System.n_FPUType != FPU_NONE ) && ( changed_prefs.cpu_model < 68020 ) )
+	{
+		Log_Printf(LOG_WARN, "FPU is not supported in 68000/010 configurations, disabling FPU\n");
+		ConfigureParams.System.n_FPUType = FPU_NONE;
+	}
+
+	changed_prefs.int_no_unimplemented = true;
+	changed_prefs.fpu_no_unimplemented = true;
+	changed_prefs.cpu_compatible = ConfigureParams.System.bCompatibleCpu;
 	changed_prefs.cpu_cycle_exact = ConfigureParams.System.bCycleExactCpu;
+	changed_prefs.cpu_memory_cycle_exact = ConfigureParams.System.bCycleExactCpu;
+	changed_prefs.address_space_24 = ConfigureParams.System.bAddressSpace24;
 	changed_prefs.fpu_model = ConfigureParams.System.n_FPUType;
 	changed_prefs.fpu_strict = ConfigureParams.System.bCompatibleFPU;
-	changed_prefs.mmu_model = ConfigureParams.System.bMMU;
-#endif
+	changed_prefs.fpu_mode = ( ConfigureParams.System.bSoftFloatFPU ? 1 : 0 );
+
+	/* Update the MMU model by taking the same value as CPU model */
+	/* MMU is only supported for CPU >=68030, this is later checked in custom.c fixup_cpu() */
+	if ( !ConfigureParams.System.bMMU )
+		changed_prefs.mmu_model = 0;				/* MMU disabled */
+	else
+		changed_prefs.mmu_model = changed_prefs.cpu_model;	/* MMU enabled */
+
+	/* Set cpu speed to default values (only used in WinUAE, not in Hatari) */
+	changed_prefs.m68k_speed = 0;
+	changed_prefs.cpu_clock_multiplier = 2 << 8;
+
+	/* We don't use JIT */
+	changed_prefs.cachesize = 0;
+
+	/* Always emulate instr/data caches for cpu >= 68020 */
+	/* Cache emulation requires cpu_compatible or cpu_cycle_exact mode */
+	if ( ( changed_prefs.cpu_model < 68020 ) ||
+	     ( ( changed_prefs.cpu_compatible == false ) && ( changed_prefs.cpu_cycle_exact == false ) ) )
+		changed_prefs.cpu_data_cache = false;
+	else
+		changed_prefs.cpu_data_cache = true;
+
+	/* Update SPCFLAG_MODE_CHANGE flag if needed */
+	check_prefs_changed_cpu();
+
+#else
+	if (ConfigureParams.System.nCpuLevel > 4)
+		ConfigureParams.System.nCpuLevel = 4;
+
+	changed_prefs.cpu_compatible = ConfigureParams.System.bCompatibleCpu;
+	changed_prefs.cpu_cycle_exact = 0;				/* With old UAE CPU, cycle_exact is always false */
+
 	if (table68k)
 		check_prefs_changed_cpu();
+#endif
+//fprintf ( stderr, "M68000_CheckCpuSettings out\n" );
 }
 
 
-/*-----------------------------------------------------------------------*/
+/**
+ * Patch the cpu tables to intercept some opcodes used for Gemdos HD
+ * emulation, extended VDI more or for NatFeats.
+ */
+void M68000_PatchCpuTables(void)
+{
+	if (Cart_UseBuiltinCartridge())
+	{
+		/* Hatari's specific illegal opcodes */
+		cpufunctbl[GEMDOS_OPCODE] = OpCode_GemDos;	/* 0x0008 */
+		cpufunctbl[PEXEC_OPCODE] = OpCode_Pexec;	/* 0x0009 */
+		cpufunctbl[SYSINIT_OPCODE] = OpCode_SysInit;	/* 0x000a */
+		cpufunctbl[VDI_OPCODE] = OpCode_VDI;		/* 0x000c */
+	}
+	else
+	{
+		/* No built-in cartridge loaded : set same handler as 0x4afc (illegal) */
+		cpufunctbl[GEMDOS_OPCODE] = cpufunctbl[0x4afc];   /* 0x0008 */
+		cpufunctbl[PEXEC_OPCODE] = cpufunctbl[0x4afc];    /* 0x0009*/
+		cpufunctbl[SYSINIT_OPCODE] = cpufunctbl[0x4afc];  /* 0x000a */
+		cpufunctbl[VDI_OPCODE] = cpufunctbl[0x4afc];      /* 0x000c */
+	}
+
+	/* Install opcodes for Native Features? */
+	if (ConfigureParams.Log.bNatFeats)
+	{
+		/* illegal opcodes for emulators Native Features */
+		cpufunctbl[NATFEAT_ID_OPCODE] = OpCode_NatFeat_ID;	/* 0x7300 */
+		cpufunctbl[NATFEAT_CALL_OPCODE] = OpCode_NatFeat_Call;	/* 0x7301 */
+	}
+	else
+	{
+		/* No Native Features : set same handler as 0x4afc (illegal) */
+		cpufunctbl[NATFEAT_ID_OPCODE] = cpufunctbl[ 0x4afc ];	/* 0x7300 */
+		cpufunctbl[NATFEAT_CALL_OPCODE] = cpufunctbl[ 0x4afc ];	/* 0x7300 */
+	}
+}
+
+
 /**
  * Save/Restore snapshot of CPU variables ('MemorySnapShot_Store' handles type)
  */
 void M68000_MemorySnapShot_Capture(bool bSave)
 {
+#if ENABLE_WINUAE_CPU
+	int len;
+	uae_u8 chunk[ 1000 ];
+
+	MemorySnapShot_Store(&pendingInterrupts, sizeof(pendingInterrupts));	/* for intlev() */
+
+	if (bSave)
+	{
+		//m68k_dumpstate_file(stderr, NULL);
+		save_cpu (&len,chunk);
+		//printf ( "save cpu done\n"  );
+		save_cpu_extra (&len,chunk);
+		//printf ( "save cpux done\n" );
+		save_fpu (&len,chunk);
+		//printf ( "save fpu done\n"  );
+		save_mmu (&len,chunk);
+		//printf ( "save mmu done\n"  );
+		//m68k_dumpstate_file(stderr, NULL);
+	}
+	else
+	{
+		//m68k_dumpstate_file(stderr, NULL);
+		restore_cpu (chunk);
+		//printf ( "restore cpu done\n" );
+		restore_cpu_extra (chunk);
+		//printf ( "restore cpux done\n" );
+		restore_fpu (chunk);
+		//printf ( "restore fpu done\n"  );
+		restore_mmu (chunk);
+		//printf ( "restore mmu done\n"  );
+		//m68k_dumpstate_file(stderr, NULL);
+	}
+
+#else /* UAE CPU core */
 	Uint32 savepc;
 
 	/* For the UAE CPU core: */
+	MemorySnapShot_Store(&pendingInterrupts, sizeof(pendingInterrupts));	/* for intlev() */
+
 	MemorySnapShot_Store(&currprefs.address_space_24,
 	                     sizeof(currprefs.address_space_24));
 	MemorySnapShot_Store(&regs.regs[0], sizeof(regs.regs));       /* D0-D7 A0-A6 */
@@ -334,17 +519,10 @@ void M68000_MemorySnapShot_Capture(bool bSave)
 	{
 		MemorySnapShot_Store(&savepc, sizeof(savepc));            /* PC */
 		regs.pc = savepc;
-#ifdef UAE_NEWCPU_H
 		regs.prefetch_pc = regs.pc + 128;
-#endif
 	}
 
-#ifdef UAE_NEWCPU_H
 	MemorySnapShot_Store(&regs.prefetch, sizeof(regs.prefetch));  /* prefetch */
-#else
-	uae_u32 prefetch_dummy;
-	MemorySnapShot_Store(&prefetch_dummy, sizeof(prefetch_dummy));
-#endif
 
 	if (bSave)
 	{
@@ -367,21 +545,20 @@ void M68000_MemorySnapShot_Capture(bool bSave)
 		MemorySnapShot_Store(&regs.isp, sizeof(regs.isp));
 		MemorySnapShot_Store(&regs.sr, sizeof(regs.sr));
 	}
+	MemorySnapShot_Store(&regs.opcode, sizeof(regs.opcode));
+	MemorySnapShot_Store(&regs.instruction_pc, sizeof(regs.instruction_pc));
 	MemorySnapShot_Store(&regs.stopped, sizeof(regs.stopped));
 	MemorySnapShot_Store(&regs.dfc, sizeof(regs.dfc));            /* DFC */
 	MemorySnapShot_Store(&regs.sfc, sizeof(regs.sfc));            /* SFC */
 	MemorySnapShot_Store(&regs.vbr, sizeof(regs.vbr));            /* VBR */
-#if ENABLE_WINUAE_CPU
 	MemorySnapShot_Store(&regs.caar, sizeof(regs.caar));          /* CAAR */
 	MemorySnapShot_Store(&regs.cacr, sizeof(regs.cacr));          /* CACR */
-#else
-	MemorySnapShot_Store(&caar, sizeof(caar));                    /* CAAR */
-	MemorySnapShot_Store(&cacr, sizeof(cacr));                    /* CACR */
-#endif
 	MemorySnapShot_Store(&regs.msp, sizeof(regs.msp));            /* MSP */
 
 	if (!bSave)
 	{
+		M68000_PatchCpuTables();
+
 		M68000_SetPC(regs.pc);
 		/* MakeFromSR() must not swap stack pointer */
 		regs.s = (regs.sr >> 13) & 1;
@@ -397,47 +574,105 @@ void M68000_MemorySnapShot_Capture(bool bSave)
 		save_fpu();
 	else
 		restore_fpu();
+#endif
 }
 
 
 /*-----------------------------------------------------------------------*/
 /**
- * BUSERROR - Access outside valid memory range.
- * Use bRead = 0 for write errors and bRead = 1 for read errors!
- * Only accesses made by the CPU will trigger a bus error, not thoses made
- * by the blitter.
+ * Check whether bus error reporting should be reported or not.
+ * We do not want to print messages when TOS is testing for available HW
+ * or when a program just checks for the floating point co-processor.
  */
-void M68000_BusError(Uint32 addr, bool bRead)
+bool M68000_IsVerboseBusError(uint32_t pc, uint32_t addr)
 {
-	/* When read or write access is made by the blitter, there's no bus error */
-	if ( BusMode == BUS_MODE_BLITTER )
-		return;
-
-	/* FIXME: In prefetch mode, m68k_getpc() seems already to point to the next instruction */
-	// BusErrorPC = M68000_GetPC();		/* [NP] We set BusErrorPC in m68k_run_1 */
-
-	/* Do not print message when TOS is testing for available HW or
-	 * when a program just checks for the floating point co-processor. */
-	if ((BusErrorPC < TosAddress || BusErrorPC > TosAddress + TosSize)
-	    && addr != 0xfffa42)
+	const uint32_t nTosProbeAddrs[] =
 	{
-		/* Print bus error message */
-		fprintf(stderr, "M68000 Bus Error %s at address $%x pc=%x\n",
-			bRead ? "reading" : "writing", addr, BusErrorPC);
+		0xf00039, 0xff8900, 0xff8a00, 0xff8c83,
+		0xff8e0d, 0xff8e09, 0xfffa40
+	};
+	const uint32_t nEmuTosProbeAddrs[] =
+	{
+		0xf0001d, 0xf0005d, 0xf0009d, 0xf000dd, 0xff8006, 0xff8282,
+		0xff8400, 0xff8701, 0xff8901, 0xff8943, 0xff8961, 0xff8c80,
+		0xff8a3c, 0xff9201, 0xfffa81, 0xfffe00
+	};
+	int idx;
+
+	if (ConfigureParams.Log.nTextLogLevel == LOG_DEBUG)
+		return true;
+
+	if (ConfigureParams.System.bAddressSpace24
+	    || (addr & 0xff000000) == 0xff000000)
+	{
+		addr &= 0xffffff;
 	}
 
-	if ((regs.spcflags & SPCFLAG_BUSERROR) == 0)	/* [NP] Check that the opcode has not already generated a read bus error */
+	/* Program just probing for FPU? A lot of C startup code is always
+	 * doing this, so reporting bus errors here would be annoying */
+	if (addr == 0xfffa42)
+		return false;
+
+	/* Always report other bus errors from normal programs */
+	if (pc < TosAddress || pc > TosAddress + TosSize)
+		return true;
+
+	for (idx = 0; idx < ARRAY_SIZE(nTosProbeAddrs); idx++)
+	{
+		if (nTosProbeAddrs[idx] == addr)
+			return false;
+	}
+
+	if (bIsEmuTOS)
+	{
+		for (idx = 0; idx < ARRAY_SIZE(nEmuTosProbeAddrs); idx++)
+		{
+			if (nEmuTosProbeAddrs[idx] == addr)
+				return false;
+		}
+	}
+
+	return true;
+}
+
+/**
+ * BUSERROR - Access outside valid memory range.
+ *   ReadWrite : BUS_ERROR_READ in case of a read or BUS_ERROR_WRITE in case of write
+ *   Size : BUS_ERROR_SIZE_BYTE or BUS_ERROR_SIZE_WORD or BUS_ERROR_SIZE_LONG
+ *   AccessType : BUS_ERROR_ACCESS_INSTR or BUS_ERROR_ACCESS_DATA
+ *   val : value we wanted to write in case of a BUS_ERROR_WRITE
+ */
+void M68000_BusError ( Uint32 addr , int ReadWrite , int Size , int AccessType , uae_u32 val )
+{
+	LOG_TRACE(TRACE_CPU_EXCEPTION, "Bus error %s at address $%x PC=$%x.\n",
+	          ReadWrite ? "reading" : "writing", addr, M68000_InstrPC);
+
+#ifndef ENABLE_WINUAE_CPU
+	if ((regs.spcflags & SPCFLAG_BUSERROR) == 0)		/* [NP] Check that the opcode has not already generated a read bus error */
 	{
 		BusErrorAddress = addr;				/* Store for exception frame */
-		bBusErrorReadWrite = bRead;
-#if ENABLE_WINUAE_CPU
-		if (currprefs.mmu_model) {
-			THROW(2);
-			return;
-		}
-#endif
+		bBusErrorReadWrite = ReadWrite;
 		M68000_SetSpecial(SPCFLAG_BUSERROR);		/* The exception will be done in newcpu.c */
 	}
+#else
+#define WINUAE_HANDLE_BUS_ERROR
+#ifdef WINUAE_HANDLE_BUS_ERROR
+
+	bool	read , ins;
+	int	size;
+
+	if ( ReadWrite == BUS_ERROR_READ )		read = true; else read = false;
+	if ( AccessType == BUS_ERROR_ACCESS_INSTR )	ins = true; else ins = false;
+	if ( Size == BUS_ERROR_SIZE_BYTE )		size = sz_byte;
+	else if ( Size == BUS_ERROR_SIZE_WORD )		size = sz_word;
+	else						size = sz_long;
+	hardware_exception2 ( addr , val , read , ins , size );
+#else
+	/* With WinUAE's cpu, on a bus error instruction will be correctly aborted before completing, */
+	/* so we don't need to check if the opcode already generated a bus error or not */
+	exception2 ( addr , ReadWrite , Size , AccessType );
+#endif
+#endif
 }
 
 
@@ -445,17 +680,16 @@ void M68000_BusError(Uint32 addr, bool bRead)
 /**
  * Exception handler
  */
-void M68000_Exception(Uint32 ExceptionVector , int ExceptionSource)
+void M68000_Exception(Uint32 ExceptionNr , int ExceptionSource)
 {
-	int exceptionNr = ExceptionVector/4;
-
+#ifndef WINUAE_FOR_HATARI
 	if ((ExceptionSource == M68000_EXC_SRC_AUTOVEC)
-		&& (exceptionNr>24 && exceptionNr<32))	/* 68k autovector interrupt? */
+		&& (ExceptionNr>24 && ExceptionNr<32))		/* 68k autovector interrupt? */
 	{
 		/* Handle autovector interrupts the UAE's way
 		 * (see intlev() and do_specialties() in UAE CPU core) */
 		/* In our case, this part is only called for HBL and VBL interrupts */
-		int intnr = exceptionNr - 24;
+		int intnr = ExceptionNr - 24;
 		pendingInterrupts |= (1 << intnr);
 		M68000_SetSpecial(SPCFLAG_INT);
 	}
@@ -472,49 +706,112 @@ void M68000_Exception(Uint32 ExceptionVector , int ExceptionSource)
 		}
 
 		/* 68k exceptions are handled by Exception() of the UAE CPU core */
-#if ENABLE_WINUAE_CPU
-		Exception(exceptionNr, m68k_getpc(), ExceptionSource);
-#else
-#ifdef UAE_NEWCPU_H
-		Exception(exceptionNr, m68k_getpc(), ExceptionSource);
-#else
-		Exception(exceptionNr, &regs, m68k_getpc(&regs));
-#endif
-#endif
-		SR = M68000_GetSR();
+		Exception(ExceptionNr, m68k_getpc(), ExceptionSource);
 
 		/* Set Status Register so interrupt can ONLY be stopped by another interrupt
-		 * of higher priority! */
-		if (ExceptionSource == M68000_EXC_SRC_INT_MFP)
+		 * of higher priority */
+		if ( (ExceptionSource == M68000_EXC_SRC_INT_MFP)
+		  || (ExceptionSource == M68000_EXC_SRC_INT_DSP) )
 		{
-			// FIXME : this test is useless, per design mfp.c will always give an address in the correct range
-			Uint32 MFPBaseVector = (unsigned int)(MFP_VR&0xf0)<<2;
-			if ( (ExceptionVector>=MFPBaseVector) && (ExceptionVector<=(MFPBaseVector+0x3c)) )
-				SR = (SR&SR_CLEAR_IPL)|0x0600; /* MFP, level 6 */
+			SR = M68000_GetSR();
+			SR = (SR&SR_CLEAR_IPL)|0x0600;		/* MFP or DSP, level 6 */
+			M68000_SetSR(SR);
 		}
-		else if (ExceptionSource == M68000_EXC_SRC_INT_DSP)
-		{
-			SR = (SR&SR_CLEAR_IPL)|0x0600;     /* DSP, level 6 */
-		}
-
-		M68000_SetSR(SR);
 	}
+
+#else
+	if ( ExceptionNr > 24 && ExceptionNr < 32 )		/* Level 1-7 interrupts */
+	{
+		/* In our case, this part is called for HBL, VBL and MFP/DSP interrupts */
+		/* For WinUAE CPU, we must call M68000_Update_intlev after changing pendingInterrupts */
+		/* (in order to call doint() and to update regs.ipl with regs.ipl_pin, else */
+		/* the exception might be delayed by one instruction in do_specialties()) */
+		pendingInterrupts |= (1 << ( ExceptionNr - 24 ));
+		M68000_Update_intlev();
+	}
+
+	else							/* direct CPU exceptions */
+	{
+		Exception(ExceptionNr);
+	}
+#endif
 }
+
+
 
 
 /*-----------------------------------------------------------------------*/
 /**
- * There seem to be wait states when a program accesses certain hardware
- * registers on the ST. Use this function to simulate these wait states.
+ * Update the list of pending interrupts.
+ * Level 2 (HBL) and 4 (VBL) are only cleared when the interrupt is processed,
+ * but level 6 is shared between MFP and DSP and can be cleared by MFP or DSP
+ * before being processed.
+ * So, we need to check which IRQ are set/cleared at the same time
+ * and update level 6 accordingly : level 6 = MFP_IRQ OR DSP_IRQ
+ *
+ * [NP] NOTE : temporary case for interrupts with WinUAE CPU in cycle exact mode
+ * In CE mode, interrupt state should be updated on each subcycle of every opcode
+ * then ipl_fetch() is called in each opcode.
+ * For now, Hatari with WinUAE CPU in CE mode only evaluates the interrupt state
+ * after the end of each opcode. So we need to call ipl_fetch() ourselves at the moment.
+ */
+void	M68000_Update_intlev ( void )
+{	
+#ifdef WINUAE_FOR_HATARI
+	Uint8	Level6_IRQ;
+
+#if ENABLE_DSP_EMU
+	Level6_IRQ = MFP_GetIRQ_CPU() | DSP_GetHREQ();
+#else
+	Level6_IRQ = MFP_GetIRQ_CPU();
+#endif
+	if ( Level6_IRQ == 1 )
+		pendingInterrupts |= (1 << 6);
+	else
+		pendingInterrupts &= ~(1 << 6);
+
+	if ( pendingInterrupts )
+		doint();
+	else
+		M68000_UnsetSpecial ( SPCFLAG_INT | SPCFLAG_DOINT );
+
+	/* Temporary case for WinUAE CPU in CE mode */
+	/* doint() will update regs.ipl_pin, so copy it into regs.ipl */
+	if ( ConfigureParams.System.bCycleExactCpu )
+		regs.ipl = regs.ipl_pin;			/* See ipl_fetch() in cpu/cpu_prefetch.h */
+#endif
+}
+
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * There are some wait states when accessing certain hardware registers on the ST.
+ * This function simulates these wait states and add the corresponding cycles.
+ *
  * [NP] with some instructions like CLR, we have a read then a write at the
  * same location, so we may have 2 wait states (read and write) to add
- * (nWaitStateCycles should be reset to 0 after the cycles were added).
+ * (WaitStateCycles should be reset to 0 after all the cycles were added
+ * in run_xx() in newcpu.c).
+ *
+ * - When CPU runs in cycle exact mode, wait states are added immediately.
+ * - For other less precise modes, all the wait states are cumulated and added
+ *   after the instruction was processed.
  */
-void M68000_WaitState(int nCycles)
+void M68000_WaitState(int WaitCycles)
 {
-	M68000_SetSpecial(SPCFLAG_EXTRA_CYCLES);
+#ifndef WINUAE_FOR_HATARI
+	WaitStateCycles += WaitCycles;				/* Cumulate all the wait states for this instruction */
 
-	nWaitStateCycles += nCycles;	/* add all the wait states for this instruction */
+#else
+	if ( ConfigureParams.System.bCycleExactCpu )
+		currcycle += ( WaitCycles * CYCLE_UNIT / 2 );	/* Add wait states immediately to the CE cycles counter */
+	else
+	{
+		WaitStateCycles += WaitCycles;			/* Cumulate all the wait states for this instruction */
+	}
+#endif
 }
 
 
@@ -526,7 +823,6 @@ void M68000_WaitState(int nCycles)
  * E Clock's frequency is 1/10th of the CPU, ie 0.8 MHz in an STF/STE
  * This delay is a multiple of 2 and will follow the pattern [ 0 8 6 4 2 ]
  */
-
 int	M68000_WaitEClock ( void )
 {
 	int	CyclesToNextE;
@@ -538,5 +834,195 @@ int	M68000_WaitEClock ( void )
 	return CyclesToNextE;
 }
 
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Some hardware registers can only be accessed on a 4 cycles boundary
+ * (shifter color regs and shifter res reg).
+ * An extra delay should be added when needed if current cycle
+ * count is not multiple of 4.
+ */
+static void	M68000_SyncCpuBus ( bool read )
+{
+	Uint64	Cycles;
+	int	CyclesToNextBus;
+
+	if ( read )
+		Cycles = Cycles_GetClockCounterOnReadAccess();
+	else
+		Cycles = Cycles_GetClockCounterOnWriteAccess();
+
+	CyclesToNextBus = Cycles & 3;
+//fprintf ( stderr , "sync bus %lld %d\n" , Cycles, CyclesToNextBus );
+	if ( CyclesToNextBus != 0 )
+	{
+//fprintf ( stderr , "sync bus wait %lld %d\n" ,Cycles, 4-CyclesToNextBus );
+		M68000_WaitState ( 4 - CyclesToNextBus );
+	}
+}
+
+
+void	M68000_SyncCpuBus_OnReadAccess ( void )
+{
+	M68000_SyncCpuBus ( true );
+}
+
+
+void	M68000_SyncCpuBus_OnWriteAccess ( void )
+{
+	M68000_SyncCpuBus ( false );
+}
+
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * In case we modified the memory by accessing it directly (and bypassing
+ * the CPU's cache mechanism), we need to flush the instruction and data
+ * caches to force an update of the caches on the next accesses.
+ *
+ * [NP] NOTE : for now, flush_instr_caches and flush_dcache flush
+ * the whole caches, not just 'addr'
+ */
+void	M68000_Flush_All_Caches ( uaecptr addr , int size )
+{
+//fprintf ( stderr , "M68000_Flush_All_Caches\n" );
+#ifdef WINUAE_FOR_HATARI
+	flush_cpu_caches(true);
+	invalidate_cpu_data_caches();
+#endif
+}
+
+
+void	M68000_Flush_Instr_Cache ( uaecptr addr , int size )
+{
+//fprintf ( stderr , "M68000_Flush_Instr_Cache\n" );
+#ifdef WINUAE_FOR_HATARI
+	/* Instruction cache for cpu >= 68020 */
+	flush_cpu_caches(true);
+#endif
+}
+
+
+void	M68000_Flush_Data_Cache ( uaecptr addr , int size )
+{
+//fprintf ( stderr , "M68000_Flush_Data_Cache\n" );
+#ifdef WINUAE_FOR_HATARI
+	/* Data cache for cpu >= 68030 */
+	invalidate_cpu_data_caches();
+#endif
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * When running in 68000 CE mode, allow to change the "do_cycles" functions
+ * in the cpu emulation depending on the blitter state.
+ *  - if the blitter is not busy, we keep the 'normal' 68000 CE "do_cycles" functions
+ *  - if the blitter is busy, we use a slightly slower "do_cycles" to accurately
+ *    count bus accesses made by the blitter and the CPU
+ *
+ * This limits the overhead of emulating cycle exact blitter bus accesses when blitter is OFF.
+ */
+void	M68000_SetBlitter_CE ( bool state )
+{
+#ifdef WINUAE_FOR_HATARI
+//fprintf ( stderr , "M68000_SetBlitter_CE state=%s\n" , state ? "on" : "off" );
+	if ( state )
+	{
+		set_x_funcs_hatari_blitter ( 1 );		/* on */
+	}
+	else
+	{
+		set_x_funcs_hatari_blitter ( 0 );		/* off */
+	}
+#endif
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * On real STF/STE hardware, DMA accesses are restricted to 4 MB (video addresses,
+ * FDC, STE DMA sound) in the range 0 - $3fffff (22 bits of address)
+ * When STF/STE are expanded beyond 4 MB, some special '_FRB' cookies variables
+ * need to be set in TOS to allocate an intermediate buffer in lower 4 MB
+ * that will be used to transfer data in RAM between 4 MB and 16 MB.
+ * This buffer is needed because real HW can't access RAM beyond 4 MB.
+ *
+ * In Hatari, we allow DMA addresses to use 24 bits when RAM size is set
+ * to 8 or 16 MB. This way any program / TOS version can make use of extra
+ * RAM beyond 4 MB without requiring an intermediate buffer.
+ *
+ * But it should be noted that programs using 24 bits of DMA addresses would
+ * not work on real HW ; this is just to make RAM expansion more transparent
+ * under emulation.
+ *
+ * We return a mask for bits 16-23 :
+ *  - 0x3f for compatibility with real HW and limit of 4 MB
+ *  - 0xff to allow DMA addresses beyond 4 MB (or for Falcon / TT)
+ */
+int	DMA_MaskAddressHigh ( void )
+{
+	if (Config_IsMachineTT() || Config_IsMachineFalcon())
+		return 0xff;					/* Falcon / TT can access 24 bits with DMA */
+
+	else if (ConfigureParams.Memory.STRamSize_KB > 4*1024)	/* ST/STE with more than 4 MB */
+		return 0xff;					/* Allow 'fake' 24 bits for DMA */
+
+	else							/* ST/STE with <= 4 MB */
+		return 0x3f;					/* Limit DMA range to 22 bits (same as real HW) */
+}
+
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * This function should be called when the cpu freq is changed, to update
+ * other components that depend on it.
+ *
+ * For now, only Falcon mode requires some updates for the crossbar
+ */
+void	M68000_ChangeCpuFreq ( void )
+{
+	if ( Config_IsMachineFalcon() )
+	{
+		Crossbar_Recalculate_Clocks_Cycles();
+	}
+}
+
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Some CPU registers can't be read or modified directly, some additional
+ * actions are required.
+ */
+Uint16	M68000_GetSR ( void )
+{
+	MakeSR();
+	return regs.sr;
+}
+
+void	M68000_SetSR ( Uint16 v )
+{
+	regs.sr = v;
+	MakeFromSR();
+}
+
+void	M68000_SetPC ( uaecptr v )
+{
+	m68k_setpc ( v );
+#ifdef WINUAE_FOR_HATARI
+	fill_prefetch();
+#else
+	refill_prefetch (m68k_getpc(), 0);
+#endif
+}
 
 

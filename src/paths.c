@@ -6,7 +6,7 @@
 
   Set up the various path strings.
 */
-const char Paths_fileid[] = "Hatari paths.c : " __DATE__ " " __TIME__;
+const char Paths_fileid[] = "Hatari paths.c";
 
 #include <unistd.h>
 #include <sys/stat.h>
@@ -15,13 +15,7 @@ const char Paths_fileid[] = "Hatari paths.c : " __DATE__ " " __TIME__;
 #include "main.h"
 #include "file.h"
 #include "paths.h"
-
-#if defined(VITA)
-#include <psp2/types.h>
-#include <psp2/io/dirent.h>
-#include <psp2/kernel/threadmgr.h>
-#define mkdir(name,mode) sceIoMkdir(name, 0777)
-#endif
+#include "str.h"
 
 #if defined(WIN32) && !defined(mkdir)
 #define mkdir(name,mode) mkdir(name)
@@ -29,19 +23,17 @@ const char Paths_fileid[] = "Hatari paths.c : " __DATE__ " " __TIME__;
 
 #if defined(__MACOSX__)
 	#define HATARI_HOME_DIR "Library/Application Support/Hatari"
+#elif defined(WIN32)
+	#define HATARI_HOME_DIR "AppData\\Local\\Hatari"
 #else
-#if defined(WIIU) || defined(VITA)
-	#define HATARI_HOME_DIR "hatari"
-#else
-	#define HATARI_HOME_DIR ".hatari"
-#endif
+	#define HATARI_HOME_DIR ".config/hatari"
 #endif
 
-static char sWorkingDir[FILENAME_MAX];    /* Working directory */
-static char sDataDir[FILENAME_MAX];       /* Directory where data files of Hatari can be found */
-static char sUserHomeDir[FILENAME_MAX];   /* User's home directory ($HOME) */
-static char sHatariHomeDir[FILENAME_MAX]; /* Hatari's home directory ($HOME/.hatari/) */
-
+static char *sWorkingDir;     /* Working directory */
+static char *sDataDir;        /* Directory where data files of Hatari can be found */
+static char *sUserHomeDir;    /* User's home directory ($HOME) */
+static char *sHatariHomeDir;  /* Hatari's home directory ($HOME/.hatari/) */
+static char *sScreenShotDir;  /* Directory to use for screenshots */
 
 /**
  * Return pointer to current working directory string
@@ -75,6 +67,22 @@ const char *Paths_GetHatariHome(void)
 	return sHatariHomeDir;
 }
 
+/**
+ * Return pointer to screenshot directory string
+ */
+const char *Paths_GetScreenShotDir(void)
+{
+	return sScreenShotDir;
+}
+
+/**
+ * Set new screenshot directory location
+ */
+void Paths_SetScreenShotDir(const char *sNewDir)
+{
+	Str_Free(sScreenShotDir);
+	sScreenShotDir = Str_Dup(sNewDir);
+}
 
 /**
  * Explore the PATH environment variable to see where our executable is
@@ -119,12 +127,11 @@ static void Paths_GetExecDirFromPATH(const char *argv0, char *pExecDir, int nMax
 		if (File_Exists(pTmpName))
 		{
 			/* Found the executable - so use the corresponding path: */
-			strncpy(pExecDir, pAct, nMaxLen);
-			pExecDir[nMaxLen-1] = 0;
+			strlcpy(pExecDir, pAct, nMaxLen);
 			break;
 		}
-		pAct = strtok (0, pToken);
-  	}
+		pAct = strtok (NULL, pToken);
+	}
 
 	free(pPathEnv);
 	free(pTmpName);
@@ -155,7 +162,7 @@ static char *Paths_InitExecDir(const char *argv0)
 	{
 		int i;
 		/* On Linux, we can analyze the symlink /proc/self/exe */
-		i = readlink("/proc/self/exe", psExecDir, FILENAME_MAX);
+		i = readlink("/proc/self/exe", psExecDir, FILENAME_MAX-1);
 		if (i > 0)
 		{
 			char *p;
@@ -173,7 +180,7 @@ static char *Paths_InitExecDir(const char *argv0)
 	/* If we do not have the execdir yet, analyze argv[0] and the PATH: */
 	if (psExecDir[0] == 0)
 	{
-		if (strchr(argv0, PATHSEP) == 0)
+		if (strchr(argv0, PATHSEP) == NULL)
 		{
 			/* No separator in argv[0], we have to explore PATH... */
 			Paths_GetExecDirFromPATH(argv0, psExecDir, FILENAME_MAX);
@@ -183,8 +190,7 @@ static char *Paths_InitExecDir(const char *argv0)
 			/* There was a path separator in argv[0], so let's assume a
 			 * relative or absolute path to the current directory in argv[0] */
 			char *p;
-			strncpy(psExecDir, argv0, FILENAME_MAX);
-			psExecDir[FILENAME_MAX-1] = 0;
+			strlcpy(psExecDir, argv0, FILENAME_MAX);
 			p = strrchr(psExecDir, PATHSEP);  /* Search last slash */
 			if (p)
 				*p = 0;                       /* Strip file name from path */
@@ -197,83 +203,80 @@ static char *Paths_InitExecDir(const char *argv0)
 
 /**
  * Initialize the users home directory string
- * and Hatari's home directory (~/.hatari)
+ * and Hatari's home directory (~/.config/hatari)
  */
 static void Paths_InitHomeDirs(void)
 {
 	char *psHome;
-#ifdef WIIU
-	strcpy(sUserHomeDir, "sd:/retroarch/cores/system");
-	strcpy(sHatariHomeDir, "sd:/retroarch/cores/system/hatari");
-	if (!File_DirExists(sHatariHomeDir))
-	{
-		if (mkdir(sHatariHomeDir, 0755) != 0)
-		{
-			strcpy(sHatariHomeDir, sUserHomeDir);
-		}
-	}
-
-	return;
-#endif
-
-#ifdef VITA
-	strcpy(sUserHomeDir, "ux0:/data/retroarch/system");
-	strcpy(sHatariHomeDir, "ux0:/data/retroarch/system/hatari");
-	if (!File_DirExists(sHatariHomeDir))
-	{
-		if (mkdir(sHatariHomeDir, 0755) != 0)
-		{
-			strcpy(sHatariHomeDir, sUserHomeDir);
-		}
-	}
-
-	return;
-#endif
 
 	psHome = getenv("HOME");
 	if (psHome)
-		strncpy(sUserHomeDir, psHome, FILENAME_MAX);
+	{
+		sUserHomeDir = Str_Dup(psHome);
+	}
 #if defined(WIN32)
 	else
 	{
 		char *psDrive;
 		int len = 0;
 		/* Windows home path? */
-		psHome = getenv("HOMEPATH");
 		psDrive = getenv("HOMEDRIVE");
 		if (psDrive)
-		{
 			len = strlen(psDrive);
-			len = len < FILENAME_MAX ? len : FILENAME_MAX;
-			strncpy(sUserHomeDir, psDrive, len);
-		}
+		psHome = getenv("HOMEPATH");
 		if (psHome)
-			strncpy(sUserHomeDir+len, psHome, FILENAME_MAX-len);
+			len += strlen(psHome);
+		if (len > 0)
+		{
+			sUserHomeDir = Str_Alloc(len);
+			if (psDrive)
+				strcpy(sUserHomeDir, psDrive);
+			if (psHome)
+				strcat(sUserHomeDir, psHome);
+		}
 	}
 #endif
-	if (!psHome)
+	if (!sUserHomeDir)
 	{
 		/* $HOME not set, so let's use current working dir as home */
-		strcpy(sUserHomeDir, sWorkingDir);
-		strcpy(sHatariHomeDir, sWorkingDir);
+		sUserHomeDir = Str_Dup(sWorkingDir);
+		sHatariHomeDir = Str_Dup(sWorkingDir);
+		return;
 	}
-	else
-	{
-		sUserHomeDir[FILENAME_MAX-1] = 0;
 
-		/* Try to use a .hatari directory in the users home directory */
-		snprintf(sHatariHomeDir, FILENAME_MAX, "%s%c%s", sUserHomeDir,
-		         PATHSEP, HATARI_HOME_DIR);
-		if (!File_DirExists(sHatariHomeDir))
+	sHatariHomeDir = Str_Alloc(strlen(sUserHomeDir) + 1 + strlen(HATARI_HOME_DIR));
+
+	/* Try to use a private hatari directory in the users home directory */
+	sprintf(sHatariHomeDir, "%s%c%s", sUserHomeDir, PATHSEP, HATARI_HOME_DIR);
+	if (File_DirExists(sHatariHomeDir))
+	{
+		return;
+	}
+	/* Try legacy location ~/.hatari */
+	sprintf(sHatariHomeDir, "%s%c.hatari", sUserHomeDir, PATHSEP);
+	if (File_DirExists(sHatariHomeDir))
+	{
+		return;
+	}
+
+	/* Hatari home directory does not exists yet...
+	 * ... so let's try to create it: */
+#if !defined(__MACOSX__) && !defined(WIN32)
+	sprintf(sHatariHomeDir, "%s%c.config", sUserHomeDir, PATHSEP);
+	if (!File_DirExists(sHatariHomeDir))
+	{
+		/* ~/.config does not exist yet, create it first */
+		if (mkdir(sHatariHomeDir, 0700) != 0)
 		{
-			/* Hatari home directory does not exists yet...
-			 * ...so let's try to create it: */
-			if (mkdir(sHatariHomeDir, 0755) != 0)
-			{
-				/* Failed to create, so use user's home dir instead */
-				strcpy(sHatariHomeDir, sUserHomeDir);
-			}
+			perror("Failed to create ~/.config directory");
 		}
+	}
+#endif
+	sprintf(sHatariHomeDir, "%s%c%s", sUserHomeDir, PATHSEP, HATARI_HOME_DIR);
+	if (mkdir(sHatariHomeDir, 0750) != 0)
+	{
+		/* Failed to create, so use user's home dir instead */
+		strcpy(sHatariHomeDir, sUserHomeDir);
 	}
 }
 
@@ -289,35 +292,38 @@ static void Paths_InitHomeDirs(void)
 void Paths_Init(const char *argv0)
 {
 	char *psExecDir;  /* Path string where the hatari executable can be found */
-#ifdef WIIU
-	strcpy(sWorkingDir, "sd:/retroarch/cores");
-	strcpy(sDataDir, "sd:/retroarch/cores/system");
-	Paths_InitHomeDirs();
-	return;
-#elif defined(VITA)
-	strcpy(sWorkingDir, "ux0:/data/retroarch/system");
-	strcpy(sDataDir, "ux0:/data/retroarch/system");
-	Paths_InitHomeDirs();
-	return;
-#else
+
 	/* Init working directory string */
-	if (getcwd(sWorkingDir, FILENAME_MAX) == NULL)
+	sWorkingDir = malloc(FILENAME_MAX);
+	if (!sWorkingDir || getcwd(sWorkingDir, FILENAME_MAX) == NULL)
 	{
 		/* This should never happen... just in case... */
-		strcpy(sWorkingDir, ".");
+		sWorkingDir = Str_Dup(".");
 	}
-#endif
+
 	/* Init the user's home directory string */
 	Paths_InitHomeDirs();
+
+	/* Init screenshot directory string */
+#if !defined(__MACOSX__)
+	sScreenShotDir = Str_Dup(sWorkingDir);
+#else
+	sScreenShotDir = Paths_GetMacScreenShotDir();
+	if (!sScreenShotDir)
+	{
+		/* Failsafe, but should not be able to happen */
+		sScreenShotDir = Str_Dup(sWorkingDir);
+	}
+#endif
 
 	/* Get the directory where the executable resides */
 	psExecDir = Paths_InitExecDir(argv0);
 
 	/* Now create the datadir path name from the bindir path name: */
+	sDataDir = Str_Alloc(FILENAME_MAX);
 	if (psExecDir && strlen(psExecDir) > 0)
 	{
-		snprintf(sDataDir, sizeof(sDataDir), "%s%c%s",
-		         psExecDir, PATHSEP, BIN2DATADIR);
+		sprintf(sDataDir, "%s%c%s", psExecDir, PATHSEP, BIN2DATADIR);
 	}
 	else
 	{
@@ -331,6 +337,15 @@ void Paths_Init(const char *argv0)
 
 	free(psExecDir);
 
-	/* fprintf(stderr, " WorkingDir = %s\n DataDir = %s\n UserHomeDir = %s\n HatariHomeDir = %s\n",
-	        sWorkingDir, sDataDir, sUserHomeDir, sHatariHomeDir); */
+	/* fprintf(stderr, " WorkingDir = %s\n DataDir = %s\n UserHomeDir = %s\n HatariHomeDir = %s\n ScrenShotDir = %s\n",
+	        sWorkingDir, sDataDir, sUserHomeDir, sHatariHomeDir, sScreenShotDir); */
+}
+
+void Paths_UnInit(void)
+{
+	Str_Free(sWorkingDir);
+	Str_Free(sDataDir);
+	Str_Free(sUserHomeDir);
+	Str_Free(sHatariHomeDir);
+	Str_Free(sScreenShotDir);
 }

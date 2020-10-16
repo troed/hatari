@@ -21,8 +21,10 @@
 #define CDECL
 #endif
 
-/* nf_asm.s ASM helper interface for natfeats.c */
+
+/* internal ASM helper interface for natfeats.c */
 long CDECL nf_id(const char *);
+/* it's best not to use this directly as arguments are untyped */
 long CDECL nf_call(long ID, ...);
 /* call only from Supervisor mode */
 int CDECL detect_nf(void);
@@ -35,6 +37,24 @@ int CDECL detect_nf(void);
  * returns zero for fail
  */
 extern int nf_init(void);
+
+/**
+ * returns NatFeats version
+ * (upper word = major number, lower word = minor number)
+ */
+extern long nf_version(void);
+
+/**
+ * get emulator name
+ * returns name length
+ */
+extern long nf_name(char *buf, long len);
+
+/**
+ * get full emulator name
+ * returns name length
+ */
+extern long nf_fullname(char *buf, long len);
 
 /**
  * print string to emulator console
@@ -60,6 +80,24 @@ extern long nf_fastforward(long enabled);
  * (runs in supervisor mode)
  */
 extern void nf_shutdown(void);
+
+/**
+ * warm reset emulation
+ * (runs in supervisor mode)
+ */
+extern void nf_reset(void);
+
+/**
+ * cold reset emulation
+ * (runs in supervisor mode)
+ */
+extern void nf_reset_cold(void);
+
+/**
+ * power off emulation
+ * (runs in supervisor mode)
+ */
+extern void nf_poweroff(void);
 
 /**
  * terminate the execution of the emulation with exit code

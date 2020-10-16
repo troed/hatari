@@ -6,7 +6,7 @@
 
   Reset emulation state.
 */
-const char Reset_fileid[] = "Hatari reset.c : " __DATE__ " " __TIME__;
+const char Reset_fileid[] = "Hatari reset.c";
 
 #include "main.h"
 #include "configuration.h"
@@ -19,12 +19,16 @@ const char Reset_fileid[] = "Hatari reset.c : " __DATE__ " " __TIME__;
 #include "hdc.h"
 #include "acia.h"
 #include "ikbd.h"
+#include "ioMem.h"
 #include "cycInt.h"
 #include "m68000.h"
 #include "mfp.h"
 #include "midi.h"
+#include "ncr5380.h"
+#include "blitter.h"
 #include "psg.h"
 #include "reset.h"
+#include "scc.h"
 #include "screen.h"
 #include "sound.h"
 #include "stMemory.h"
@@ -36,6 +40,7 @@ const char Reset_fileid[] = "Hatari reset.c : " __DATE__ " " __TIME__;
 #include "falcon/dsp.h"
 #include "debugcpu.h"
 #include "debugdsp.h"
+#include "nf_scsidrv.h"
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -48,16 +53,22 @@ static int Reset_ST(bool bCold)
 	{
 		int ret;
 
+		IoMem_Reset();
 		Floppy_GetBootDrive();      /* Find which device to boot from (A: or C:) */
 
-		ret = TOS_LoadImage();      /* Load TOS, writes into cartridge memory */
+		ret = TOS_InitImage();      /* Load TOS and copy it into ROM memory */
 		if (ret)
 			return ret;               /* If we can not load a TOS image, return now! */
 
 		Cart_ResetImage();          /* Load cartridge program into ROM memory. */
+
+		/* Video timings can change only on cold boot (wakeup states) */
+		Video_SetTimings ( ConfigureParams.System.nMachineType , ConfigureParams.System.VideoTimingMode );
 	}
+
+	STMemory_Reset (bCold);
 	CycInt_Reset();               /* Reset interrupts */
-	MFP_Reset();                  /* Setup MFP chip */
+	MFP_Reset_All();              /* Setup MFPs */
 	Video_Reset();                /* Reset video */
 	VDI_Reset();                  /* Reset internal VDI variables */
 	NvRam_Reset();                /* reset NvRAM (video) settings */
@@ -69,13 +80,12 @@ static int Reset_ST(bool bCold)
 	}
 	Floppy_Reset();			/* Reset Floppy */
 
-	if (ConfigureParams.System.nMachineType == MACHINE_FALCON
-	    || ConfigureParams.System.nMachineType == MACHINE_TT)
+	if (Config_IsMachineFalcon() || Config_IsMachineTT())
 	{
 		Ncr5380_Reset();
 	}
 
-	if (ConfigureParams.System.nMachineType == MACHINE_FALCON)
+	if (Config_IsMachineFalcon())
 	{
 		DSP_Reset();                  /* Reset the DSP */
 		Crossbar_Reset(bCold);        /* Reset Crossbar sound */
@@ -83,20 +93,27 @@ static int Reset_ST(bool bCold)
 	else
 		DmaSnd_Reset(bCold);          /* Reset DMA sound */
 
+	Blitter_Reset();			/* Reset Blitter */
 	PSG_Reset();                  /* Reset PSG */
 	Sound_Reset();                /* Reset Sound */
 	ACIA_Reset( ACIA_Array );     /* ACIA */
 	IKBD_Reset(bCold);            /* Keyboard (after ACIA) */
-	if (ConfigureParams.System.nMachineType == MACHINE_FALCON && !bUseVDIRes)
+	SCC_Reset();
+	if (Config_IsMachineFalcon() && !bUseVDIRes)
 		VIDEL_reset();
 	else
-		Screen_Reset();               /* Reset screen */
-	M68000_Reset(bCold);          /* Reset CPU */
+		Screen_Reset();		/* Reset screen */
+
+	M68000_Reset(bCold);		/* Reset CPU */
 
 	DebugCpu_SetDebugging();      /* Re-set debugging flag if needed */
 	DebugDsp_SetDebugging();
 
 	Midi_Reset();
+
+#if defined(__linux__)
+        nf_scsidrv_reset();
+#endif
 
 	/* Start HBL, Timer B and VBL interrupts with a 0 cycle delay */
 	Video_StartInterrupts( 0 );
@@ -111,7 +128,8 @@ static int Reset_ST(bool bCold)
  */
 int Reset_Cold(void)
 {
-	Main_WarpMouse(sdlscrn->w/2, sdlscrn->h/2);  /* Set mouse pointer to the middle of the screen */
+	/* Set mouse pointer to the middle of the screen */
+	Main_WarpMouse(sdlscrn->w/2, sdlscrn->h/2, false);
 
 	return Reset_ST(true);
 }

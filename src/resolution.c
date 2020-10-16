@@ -6,11 +6,12 @@
 
   SDL resolution limitation and selection routines.
 */
-const char Resolution_fileid[] = "Hatari resolution.c : " __DATE__ " " __TIME__;
+const char Resolution_fileid[] = "Hatari resolution.c";
 
 #include <SDL.h>
 #include "main.h"
 #include "configuration.h"
+#include "log.h"
 #include "resolution.h"
 #include "statusbar.h"
 #include "screen.h"
@@ -26,12 +27,11 @@ const char Resolution_fileid[] = "Hatari resolution.c : " __DATE__ " " __TIME__;
 static int DesktopWidth, DesktopHeight;
 
 /**
- * Initilizes resolution settings (gets current desktop
+ * Initializes resolution settings (gets current desktop
  * resolution, sets max Falcon/TT Videl zooming resolution).
  */
 void Resolution_Init(void)
 {
-#ifndef __LIBRETRO__
 #if WITH_SDL2
 	SDL_DisplayMode dm;
 	if (SDL_GetDesktopDisplayMode(0, &dm) == 0)
@@ -41,11 +41,11 @@ void Resolution_Init(void)
 	}
 	else
 	{
-		fprintf(stderr, "SDL_GetDesktopDisplayMode failed: %s", SDL_GetError());
+		Log_Printf(LOG_ERROR, "SDL_GetDesktopDisplayMode failed: %s", SDL_GetError());
 		DesktopWidth = 2*NUM_VISIBLE_LINE_PIXELS;
 		DesktopHeight = 2*NUM_VISIBLE_LINES+STATUSBAR_MAX_HEIGHT;
 	}
-#else
+#else /* !WITH_SDL2 */
 	/* Needs to be called after SDL video and configuration
 	 * initialization, but before Hatari Screen init is called
 	 * for the first time!
@@ -58,24 +58,18 @@ void Resolution_Init(void)
 		/* target 800x600 screen with statusbar out of screen */
 		DesktopWidth = 2*NUM_VISIBLE_LINE_PIXELS;
 		DesktopHeight = 2*NUM_VISIBLE_LINES+STATUSBAR_MAX_HEIGHT;
-		fprintf(stderr, "WARNING: invalid desktop size %dx%d, defaulting to %dx%d!\n",
-			info->current_w, info->current_h, DesktopWidth, DesktopHeight);
+		Log_Printf(LOG_WARN, "invalid desktop size %dx%d, defaulting to %dx%d!\n",
+		           info->current_w, info->current_h, DesktopWidth, DesktopHeight);
 	}
-#endif
+#endif /* !WITH_SDL2 */
 	/* if user hasn't set own max zoom size, use desktop size */
 	if (!(ConfigureParams.Screen.nMaxWidth &&
 	      ConfigureParams.Screen.nMaxHeight)) {
 		ConfigureParams.Screen.nMaxWidth = DesktopWidth;
 		ConfigureParams.Screen.nMaxHeight = DesktopHeight;
 	}
-#else
-DesktopWidth = retrow;
-DesktopHeight = retroh;
-ConfigureParams.Screen.nMaxWidth = DesktopWidth;
-ConfigureParams.Screen.nMaxHeight = DesktopHeight;
-#endif
 	DEBUGPRINT(("Desktop resolution: %dx%d\n",DesktopWidth, DesktopHeight));
-	fprintf(stderr, "Configured max Hatari resolution = %dx%d, optimal for ST = %dx%d\n",
+	Log_Printf(LOG_DEBUG, "Configured max Hatari resolution = %dx%d, optimal for ST = %dx%d\n",
 		ConfigureParams.Screen.nMaxWidth, ConfigureParams.Screen.nMaxHeight,
 		2*NUM_VISIBLE_LINE_PIXELS, 2*NUM_VISIBLE_LINES+STATUSBAR_MAX_HEIGHT);
 }
@@ -107,7 +101,8 @@ static void Resolution_GetMaxSize(int *width, int *height)
  * - Otherwise select the largest available mode
  * return true for success and false if no matching mode was found.
  */
-static inline bool Resolution_Select(SDL_Rect **modes, int *width, int *height)
+#if !WITH_SDL2
+static bool Resolution_Select(SDL_Rect **modes, int *width, int *height)
 {
 #define TOO_LARGE 0x7fff
 	int i, bestw, besth;
@@ -144,6 +139,7 @@ static inline bool Resolution_Select(SDL_Rect **modes, int *width, int *height)
 	return true;
 #undef TOO_LARGE
 }
+#endif /* !WITH_SDL2 */
 
 
 /**
@@ -155,7 +151,6 @@ static inline bool Resolution_Select(SDL_Rect **modes, int *width, int *height)
  */
 bool Resolution_Search(int *width, int *height, int *bpp, bool keep)
 {
-#ifndef __LIBRETRO__
 #if !WITH_SDL2
 	SDL_Rect **modes;
 	SDL_PixelFormat pixelformat;
@@ -172,7 +167,11 @@ bool Resolution_Search(int *width, int *height, int *bpp, bool keep)
 		if (keep)
 		{
 			Resolution_GetDesktopSize(width, height);
+#if WITH_SDL2
+			return false;
+#else
 			return true;
+#endif
 		}
 	}
 	if (ConfigureParams.Screen.bForceMax)
@@ -212,19 +211,15 @@ bool Resolution_Search(int *width, int *height, int *bpp, bool keep)
 	}
 
 	if (modes == (SDL_Rect **) 0) {
-		fprintf(stderr, "WARNING: No suitable video modes available!\n");
+		Log_Printf(LOG_WARN, "no suitable video modes available!\n");
 	}
 
 	if (modes == (SDL_Rect **) -1) {
 		/* Any mode available */
 		DEBUGPRINT(("resolution: All resolutions available.\n"));
 	}
-#endif
-#else
-*width = retrow;
-*height = retroh;
-*bpp = 2;
-#endif
+#endif /* !WITH_SDL2 */
+
 	DEBUGPRINT(("resolution: video mode selected: %dx%dx%d\n",
 		 *width, *height, *bpp));
 	return false;

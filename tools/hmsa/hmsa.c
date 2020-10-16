@@ -50,7 +50,7 @@ static void do_newline(const char *text)
 /**
  * Output Hatari log string.
  */
-extern void Log_Printf(LOGTYPE nType, const char *psFormat, ...)
+void Log_Printf(LOGTYPE nType, const char *psFormat, ...)
 {
 	va_list argptr;
 	print_prefix(nType);
@@ -62,7 +62,7 @@ extern void Log_Printf(LOGTYPE nType, const char *psFormat, ...)
 /**
  * Output Hatari Alert dialog string.
  */
-extern void Log_AlertDlg(LOGTYPE nType, const char *psFormat, ...)
+void Log_AlertDlg(LOGTYPE nType, const char *psFormat, ...)
 {
 	va_list argptr;
 	print_prefix(nType);
@@ -90,12 +90,12 @@ int DlgAlert_Query(const char *text)
  * We do it also for STX.
  */
 extern bool IPF_FileNameIsIPF(const char *pszFileName, bool bAllowGZ);		/* function prototype */
-extern bool IPF_FileNameIsIPF(const char *pszFileName, bool bAllowGZ)
+bool IPF_FileNameIsIPF(const char *pszFileName, bool bAllowGZ)
 {
 	return FALSE;
 }
 extern bool STX_FileNameIsSTX(const char *pszFileName, bool bAllowGZ);		/* function prototype */
-extern bool STX_FileNameIsSTX(const char *pszFileName, bool bAllowGZ)
+bool STX_FileNameIsSTX(const char *pszFileName, bool bAllowGZ)
 {
 	return FALSE;
 }
@@ -125,7 +125,7 @@ static const char* create_image(const char *filename, const char *sizeid)
 	} else {
 		return "ERROR: given disk size isn't one of supported ones!\n";
 	}
-	if (CreateBlankImage_CreateFile(filename, tracks, sectors, sides)) {
+	if (CreateBlankImage_CreateFile(filename, tracks, sectors, sides, NULL)) {
 		return NULL;
 	}
 	return "ERROR: Disk creation failed.\n";
@@ -245,7 +245,7 @@ int main(int argc, char *argv[])
 	} else {
 		/* Just read disk image directly into buffer */
 		disksize = 0;
-		diskbuf = HFile_Read(srcfile, &disksize, NULL);
+		diskbuf = File_Read(srcfile, &disksize, NULL);
 		if (!diskbuf || disksize < 512*8) {
 			fprintf(stderr, "ERROR: could not read ST disk %s!\n", srcfile);
 			retval = -1;

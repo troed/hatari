@@ -134,8 +134,10 @@
 /* 2014/09/07	[NP]	For address error, store if the access was in cpu space or data space and fix	*/
 /*			the exception stack frame accordingly (fix Blood Money on Superior 65,		*/
 /*			PC=4e664e66 after RTS)								*/
+/* 2015/02/11	[NP]	Replace BusErrorPC by regs.instruction_pc, to get similar code to WinUAE's cpu	*/
 
-const char NewCpu_fileid[] = "Hatari newcpu.c : " __DATE__ " " __TIME__;
+
+const char NewCpu_fileid[] = "Hatari newcpu.c";
 
 #include "sysdeps.h"
 #include "hatari-glue.h"
@@ -144,6 +146,7 @@ const char NewCpu_fileid[] = "Hatari newcpu.c : " __DATE__ " " __TIME__;
 #include "newcpu.h"
 #include "main.h"
 #include "m68000.h"
+#include "reset.h"
 #include "cycInt.h"
 #include "mfp.h"
 #include "tos.h"
@@ -160,12 +163,7 @@ const char NewCpu_fileid[] = "Hatari newcpu.c : " __DATE__ " " __TIME__;
 #include "debugui.h"
 #include "debugcpu.h"
 #include "68kDisass.h"
-
-#ifdef HAVE_CAPSIMAGE
-#if CAPSIMAGE_VERSION == 5
-#include <caps5/CapsLibAll.h>
-#endif
-#endif
+#include "stMemory.h"
 
 //#define DEBUG_PREFETCH
 
@@ -177,6 +175,8 @@ uae_u16 last_op_for_exception_3;
 uaecptr last_addr_for_exception_3;
 /* Address that generated the exception */
 uaecptr last_fault_for_exception_3;
+/* read (0) or write (1) access */
+int last_writeaccess_for_exception_3;
 /* instruction (1) or data (0) access */
 int last_instructionaccess_for_exception_3;
 
@@ -195,6 +195,8 @@ cpuop_func *cpufunctbl[65536];
 
 int OpcodeFamily;
 int BusCyclePenalty = 0;
+
+bool cpu_bus_rmw = false;
 
 #define COUNT_INSTRS 0
 
@@ -247,6 +249,11 @@ void dump_counts (void)
 {
 }
 #endif
+
+static void cpu_halt ( void )
+{
+	Dialog_HaltDlg();
+}
 
 
 static unsigned long op_illg_1 (uae_u32 opcode) REGPARAM;
@@ -381,9 +388,9 @@ struct regstruct regs;
 static long int m68kpc_offset;
 
 
-#define get_ibyte_1(o) get_byte(regs.pc + (regs.pc_p - regs.pc_oldp) + (o) + 1)
-#define get_iword_1(o) get_word(regs.pc + (regs.pc_p - regs.pc_oldp) + (o))
-#define get_ilong_1(o) get_long(regs.pc + (regs.pc_p - regs.pc_oldp) + (o))
+#define get_ibyte_1(o) STMemory_ReadByte(regs.pc + (regs.pc_p - regs.pc_oldp) + (o) + 1)
+#define get_iword_1(o) STMemory_ReadWord(regs.pc + (regs.pc_p - regs.pc_oldp) + (o))
+#define get_ilong_1(o) STMemory_ReadLong(regs.pc + (regs.pc_p - regs.pc_oldp) + (o))
 
 uae_s32 ShowEA (FILE *f, int reg, amodes mode, wordsizes size, char *buf)
 {
@@ -881,7 +888,7 @@ void Exception(int nr, uaecptr oldpc, int ExceptionSource)
     /* We need to handle MFP and HBL/VBL cases for this. */
     if ( ExceptionSource == M68000_EXC_SRC_INT_MFP )
     {
-        M68000_AddCycles ( CPU_IACK_CYCLES_MFP );
+        M68000_AddCycles ( CPU_IACK_CYCLES_START+CPU_IACK_CYCLES_MFP );
 	CPU_IACK = true;
         while ( ( PendingInterruptCount <= 0 ) && ( PendingInterruptFunction ) )
             CALL_VAR(PendingInterruptFunction);
@@ -890,12 +897,12 @@ void Exception(int nr, uaecptr oldpc, int ExceptionSource)
     }
     else if ( ( ExceptionSource == M68000_EXC_SRC_AUTOVEC ) && ( ( nr == 26 ) || ( nr == 28 ) ) )
     {
-        M68000_AddCycles ( CPU_IACK_CYCLES_VIDEO );
+        M68000_AddCycles ( CPU_IACK_CYCLES_START+CPU_IACK_CYCLES_VIDEO );
 	CPU_IACK = true;
         while ( ( PendingInterruptCount <= 0 ) && ( PendingInterruptFunction ) )
             CALL_VAR(PendingInterruptFunction);
         if ( MFP_UpdateNeeded == true )
-            MFP_UpdateIRQ ( 0 );					/* update MFP's state if some internal timers related to MFP expired */
+            MFP_UpdateIRQ_All ( 0 );					/* update MFP's state if some internal timers related to MFP expired */
         pendingInterrupts &= ~( 1 << ( nr - 24 ) );			/* clear HBL or VBL pending bit */
 	CPU_IACK = false;
     }
@@ -988,7 +995,7 @@ void Exception(int nr, uaecptr oldpc, int ExceptionSource)
     put_word (m68k_areg(regs, 7), regs.sr);
 
     LOG_TRACE(TRACE_CPU_EXCEPTION, "cpu exception %d currpc %x buspc %x newpc %x fault_e3 %x op_e3 %hx addr_e3 %x\n",
-	nr, currpc, BusErrorPC, get_long (regs.vbr + 4*nr), last_fault_for_exception_3, last_op_for_exception_3, last_addr_for_exception_3);
+	nr, currpc, regs.instruction_pc, get_long (regs.vbr + 4*nr), last_fault_for_exception_3, last_op_for_exception_3, last_addr_for_exception_3);
 
     /* 68000 bus/address errors: */
     if (currprefs.cpu_level==0 && (nr==2 || nr==3) && ExceptionSource == M68000_EXC_SRC_CPU) {
@@ -1001,64 +1008,65 @@ void Exception(int nr, uaecptr oldpc, int ExceptionSource)
 	m68k_areg(regs, 7) -= 8;
 	if (nr == 3) {    /* Address error */
 	    specialstatus |= ( last_op_for_exception_3 & (~0x1f) );	/* [NP] unused bits of specialstatus are those of the last opcode ! */
+	    if (last_writeaccess_for_exception_3==0)
+	      specialstatus |= 0x10;					/* bit 4 : 0=write 1=read */
 	    put_word (m68k_areg(regs, 7), specialstatus);
 	    put_long (m68k_areg(regs, 7)+2, last_fault_for_exception_3);
 	    put_word (m68k_areg(regs, 7)+6, last_op_for_exception_3);
 	    put_long (m68k_areg(regs, 7)+10, last_addr_for_exception_3);
+
+	    /* [NP] PC stored in the stack frame is not necessarily pointing to the next instruction ! */
+	    /* FIXME : we should have a proper model for this, in the meantime we handle specific cases */
+	    if ( last_op_for_exception_3 == 0x2285 )						/* move.l d5,(a1) (War Heli) */
+	      put_long (m68k_areg(regs, 7)+10, currpc+4);					/* correct PC is 2 bytes more than usual value */
+
+	    fprintf(stderr,"Address Error at address $%x, PC=$%x addr_e3=%x op_e3=%x\n",last_fault_for_exception_3, currpc, last_addr_for_exception_3, last_op_for_exception_3);
 	    if (ExceptionDebugMask & EXCEPT_ADDRESS) {
-	      fprintf(stderr,"Address Error at address $%x, PC=$%x\n",last_fault_for_exception_3,currpc);
 	      DebugUI(REASON_CPU_EXCEPTION);
 	    }
 	}
 	else {    /* Bus error */
 	    /* Get the opcode that caused the bus error, to adapt the stack frame in some cases */
-	    /* (we must call get_word() only on valid region, else this will cause a double bus error) */
-	    if ( valid_address ( BusErrorPC , 2 ) )
-	      BusError_opcode = get_word(BusErrorPC);
-	    else
-	      BusError_opcode = 0;
+	    BusError_opcode = regs.opcode;
 
 	    specialstatus |= ( BusError_opcode & (~0x1f) );		/* [NP] unused bits of special status are those of the last opcode ! */
 	    if (bBusErrorReadWrite)
-	      specialstatus |= 0x10;
+	      specialstatus |= 0x10;					/* bit 4 : 0=write 1=read */
 	    put_word (m68k_areg(regs, 7), specialstatus);
 	    put_long (m68k_areg(regs, 7)+2, BusErrorAddress);
 	    put_word (m68k_areg(regs, 7)+6, BusError_opcode);		/* Opcode */
 
 	    /* [NP] PC stored in the stack frame is not necessarily pointing to the next instruction ! */
 	    /* FIXME : we should have a proper model for this, in the meantime we handle specific cases */
-	    if ( BusError_opcode == 0x21f8 )						/* move.l $0.w,$24.w (Transbeauce 2 loader) */
-	      put_long (m68k_areg(regs, 7)+10, currpc-2);				/* correct PC is 2 bytes less than usual value */
+	    if ( BusError_opcode == 0x21f8 )							/* move.l $0.w,$24.w (Transbeauce 2 loader) */
+	      put_long (m68k_areg(regs, 7)+10, currpc-2);					/* correct PC is 2 bytes less than usual value */
 
-	    else if ( ( BusErrorPC == 0xccc ) && ( BusError_opcode == 0x48d6 ) )	/* 48d6 3f00 movem.l a0-a5,(a6) (Blood Money) */
-	      put_long (m68k_areg(regs, 7)+10, currpc+2);				/* correct PC is 2 bytes more than usual value */
+	    else if ( ( regs.instruction_pc == 0xccc ) && ( BusError_opcode == 0x48d6 ) )	/* 48d6 3f00 movem.l a0-a5,(a6) (Blood Money) */
+	      put_long (m68k_areg(regs, 7)+10, currpc+2);					/* correct PC is 2 bytes more than usual value */
 
-	    else if ( ( BusErrorPC == 0x1fece ) && ( BusError_opcode == 0x33d4 ) )	/* 1fece : 33d4 0001 fdca move.w (a4),$1fdca (Batman The Movie) */
-	      put_long (m68k_areg(regs, 7)+10, currpc-4);				/* correct PC is 4 bytes less than usual value */
+	    else if ( ( regs.instruction_pc == 0x1fece ) && ( BusError_opcode == 0x33d4 ) )	/* 1fece : 33d4 0001 fdca move.w (a4),$1fdca (Batman The Movie) */
+	      put_long (m68k_areg(regs, 7)+10, currpc-4);					/* correct PC is 4 bytes less than usual value */
 
 	    /* [NP] In case of a move with a bus error on the read part, uae cpu is writing to the dest part */
 	    /* then process the bus error ; on a real CPU, the bus error occurs after the read and before the */
 	    /* write, so the dest part doesn't change. For now, we restore the dest part on some specific cases */
 	    /* FIXME : the bus error should be processed just after the read, not at the end of the instruction */
-	    else if ( ( BusErrorPC == 0x62a ) && ( BusError_opcode == 0x3079 ) )	/* 3079 4ef9 0000 move.l $4ef90000,a0 (Dragon Flight) */
-	      m68k_areg(regs, 0) = 8;							/* A0 should not be changed to "0" but keep its value "8" */
+	    else if ( ( regs.instruction_pc == 0x62a ) && ( BusError_opcode == 0x3079 ) )	/* 3079 4ef9 0000 move.l $4ef90000,a0 (Dragon Flight) */
+	      m68k_areg(regs, 0) = 8;								/* A0 should not be changed to "0" but keep its value "8" */
 
-	    else if ( get_long(BusErrorPC) == 0x13f88e21 )				/* 13f8 8e21 move.b $ffff8e21.w,$xxxxx (Tymewarp) */
-	      put_byte ( get_long(BusErrorPC+4) , 0x00 );				/* dest content should not be changed to "ff" but keep its value "00" */
+	    else if ( get_long(regs.instruction_pc) == 0x13f88e21 )				/* 13f8 8e21 move.b $ffff8e21.w,$xxxxx (Tymewarp) */
+	      put_byte ( get_long(regs.instruction_pc+4) , 0x00 );				/* dest content should not be changed to "ff" but keep its value "00" */
 
-	    fprintf(stderr,"Bus Error at address $%x, PC=$%lx %x %x\n", BusErrorAddress, (long)currpc, BusErrorPC , BusError_opcode);
+	    if (M68000_IsVerboseBusError(currpc, BusErrorAddress)) {
+	      Log_Printf(LOG_WARN, "Bus Error at address $%x, PC=$%x addr_e3=%x op_e3=%x\n",
+	                 BusErrorAddress, currpc,
+	                 get_long(m68k_areg(regs, 7) + 10), BusError_opcode);
+	    }
 
 	    /* Check for double bus errors: */
 	    if (regs.spcflags & SPCFLAG_BUSERROR) {
-	      fprintf(stderr, "Detected double bus error at address $%x, PC=$%lx => CPU halted!\n",
-	              BusErrorAddress, (long)currpc);
-	      unset_special(SPCFLAG_BUSERROR);
-	      if (ExceptionDebugMask & EXCEPT_BUS)
-	        DebugUI(REASON_CPU_EXCEPTION);
-	      else
-		DlgAlert_Notice("Detected double bus error => CPU halted!\nEmulation needs to be reset.\n");
-	      regs.intmask = 7;
-	      m68k_setstopped(true);
+	      fprintf(stderr, "Detected double bus error at address $%x, PC=$%lx => CPU halted!\n", BusErrorAddress, (long)currpc);
+	      cpu_halt();
 	      return;
 	    }
 	    if ((ExceptionDebugMask & EXCEPT_BUS) && BusErrorAddress!=0xff8a00) {
@@ -1078,11 +1086,8 @@ void Exception(int nr, uaecptr oldpc, int ExceptionSource)
       {
         if ( nr==2 || nr==3 )			/* address error during bus/address error -> stop emulation */
             {
-	      fprintf(stderr,"Address Error during exception 2/3, aborting new PC=$%x\n",newpc);
-	      if (ExceptionDebugMask & (EXCEPT_BUS|EXCEPT_ADDRESS))
-	        DebugUI(REASON_CPU_EXCEPTION);
-	      else
-		DlgAlert_Notice("Address Error during exception 2/3 => CPU halted!\nEmulation needs to be reset.\n");
+	      fprintf(stderr,"Address Error during exception 2/3, new PC=$%x => CPU halted\n",newpc);
+	      cpu_halt();
             }
         else
             {
@@ -1103,16 +1108,16 @@ void Exception(int nr, uaecptr oldpc, int ExceptionSource)
     /* Handle exception cycles (special case for MFP) */
     if (ExceptionSource == M68000_EXC_SRC_INT_MFP)
     {
-      M68000_AddCycles(44+12-CPU_IACK_CYCLES_MFP);	/* MFP interrupt, 'nr' can be in a different range depending on $fffa17 */
+      M68000_AddCycles(44+12-CPU_IACK_CYCLES_START-CPU_IACK_CYCLES_MFP);	/* MFP interrupt, 'nr' can be in a different range depending on $fffa17 */
     }
     else if (nr >= 24 && nr <= 31)
     {
-      if ( nr == 26 )					/* HBL */
-        M68000_AddCycles(44+12-CPU_IACK_CYCLES_VIDEO);	/* Video Interrupt */
-      else if ( nr == 28 ) 				/* VBL */
-        M68000_AddCycles(44+12-CPU_IACK_CYCLES_VIDEO);	/* Video Interrupt */
+      if ( nr == 26 )								/* HBL */
+        M68000_AddCycles(44+12-CPU_IACK_CYCLES_START-CPU_IACK_CYCLES_VIDEO);	/* Video Interrupt */
+      else if ( nr == 28 ) 							/* VBL */
+        M68000_AddCycles(44+12-CPU_IACK_CYCLES_START-CPU_IACK_CYCLES_VIDEO);	/* Video Interrupt */
       else
-        M68000_AddCycles(44+4);				/* Other Interrupts */
+        M68000_AddCycles(44+4);			/* Other Interrupts */
     }
     else if(nr >= 32 && nr <= 47)
     {
@@ -1159,7 +1164,6 @@ static void Interrupt(int nr , int Pending)
 }
 
 
-uae_u32 caar, cacr;
 static uae_u32 itt0, itt1, dtt0, dtt1, tc, mmusr, urp, srp;
 
 
@@ -1206,7 +1210,7 @@ int m68k_move2c (int regno, uae_u32 *regp)
 		cacr_mask = 0x00003f1f;
 	    else if (currprefs.cpu_level == 4)	// 68040
 		cacr_mask = 0x80008000;
-	    cacr = *regp & cacr_mask;
+	    regs.cacr = *regp & cacr_mask;
 	}
 	case 3: tc = *regp & 0xc000; break;
 	  /* Mask out fields that should be zero.  */
@@ -1217,7 +1221,7 @@ int m68k_move2c (int regno, uae_u32 *regp)
 
 	case 0x800: regs.usp = *regp; break;
 	case 0x801: regs.vbr = *regp; break;
-	case 0x802: caar = *regp; break;
+	case 0x802: regs.caar = *regp; break;
 	case 0x803: regs.msp = *regp; if (regs.m == 1) m68k_areg(regs, 7) = regs.msp; break;
 	case 0x804: regs.isp = *regp; if (regs.m == 0) m68k_areg(regs, 7) = regs.isp; break;
 	case 0x805: mmusr = *regp; break;
@@ -1240,7 +1244,7 @@ int m68k_movec2 (int regno, uae_u32 *regp)
 	switch (regno) {
 	case 0: *regp = regs.sfc; break;
 	case 1: *regp = regs.dfc; break;
-	case 2: *regp = cacr; break;
+	case 2: *regp = regs.cacr; break;
 	case 3: *regp = tc; break;
 	case 4: *regp = itt0; break;
 	case 5: *regp = itt1; break;
@@ -1248,7 +1252,7 @@ int m68k_movec2 (int regno, uae_u32 *regp)
 	case 7: *regp = dtt1; break;
 	case 0x800: *regp = regs.usp; break;
 	case 0x801: *regp = regs.vbr; break;
-	case 0x802: *regp = caar; break;
+	case 0x802: *regp = regs.caar; break;
 	case 0x803: *regp = regs.m == 1 ? m68k_areg(regs, 7) : regs.msp; break;
 	case 0x804: *regp = regs.m == 0 ? m68k_areg(regs, 7) : regs.isp; break;
 	case 0x805: *regp = mmusr; break;
@@ -1262,6 +1266,7 @@ int m68k_movec2 (int regno, uae_u32 *regp)
     return 1;
 }
 
+#if !defined(uae_s64)
 STATIC_INLINE int
 div_unsigned(uae_u32 src_hi, uae_u32 src_lo, uae_u32 ndiv, uae_u32 *quot, uae_u32 *rem)
 {
@@ -1286,6 +1291,7 @@ div_unsigned(uae_u32 src_hi, uae_u32 src_lo, uae_u32 ndiv, uae_u32 *quot, uae_u3
 	*rem = src_hi;
 	return 0;
 }
+#endif
 
 void m68k_divl (uae_u32 opcode, uae_u32 src, uae_u16 extra, uaecptr oldpc)
 {
@@ -1408,6 +1414,7 @@ void m68k_divl (uae_u32 opcode, uae_u32 src, uae_u16 extra, uaecptr oldpc)
 #endif
 }
 
+#if !defined(uae_s64)
 STATIC_INLINE void
 mul_unsigned(uae_u32 src1, uae_u32 src2, uae_u32 *dst_hi, uae_u32 *dst_lo)
 {
@@ -1426,6 +1433,7 @@ mul_unsigned(uae_u32 src1, uae_u32 src2, uae_u32 *dst_hi, uae_u32 *dst_lo)
 	*dst_lo = lo;
 	*dst_hi = r3;
 }
+#endif
 
 void m68k_mull (uae_u32 opcode, uae_u32 src, uae_u16 extra)
 {
@@ -1627,7 +1635,7 @@ static bool do_specialties_interrupt (int Pending)
 
     /* Check for MFP ints (level 6) */
     if (regs.spcflags & SPCFLAG_MFP) {
-       if (MFP_ProcessIRQ() == true)
+       if (MFP_ProcessIRQ_All() == true)
          return true;					/* MFP exception was generated, no higher interrupt can happen */
     }
 
@@ -1657,11 +1665,10 @@ static int do_specialties (void)
 	Exception(2,0,M68000_EXC_SRC_CPU);
     }
 
-    if(regs.spcflags & SPCFLAG_EXTRA_CYCLES) {
+    if ( WaitStateCycles ) {
 	/* Add some extra cycles to simulate a wait state */
-	unset_special(SPCFLAG_EXTRA_CYCLES);
-	M68000_AddCycles(nWaitStateCycles);
-	nWaitStateCycles = 0;
+	M68000_AddCycles(WaitStateCycles);
+	WaitStateCycles = 0;
     }
 
     if (regs.spcflags & SPCFLAG_DOTRACE) {
@@ -1694,9 +1701,9 @@ static int do_specialties (void)
 	    while ( ( PendingInterruptCount <= 0 ) && ( PendingInterruptFunction ) )
 		CALL_VAR(PendingInterruptFunction);
 	    if ( MFP_UpdateNeeded == true )
-	        MFP_UpdateIRQ ( 0 );
+	        MFP_UpdateIRQ_All ( 0 );
 
-	    /* Check is there's an interrupt to process (could be a delayed MFP interrupt) */
+	    /* Check if there's an interrupt to process (could be a delayed MFP interrupt) */
 	    if ( do_specialties_interrupt(false) ) {	/* test if there's an interrupt and add non pending jitter */
 		regs.stopped = 0;
 		unset_special (SPCFLAG_STOP);
@@ -1744,7 +1751,7 @@ static void m68k_run_1 (void)
     for (;;) {
 	int cycles;
 //fprintf (stderr, "ir in  %x %x\n",do_get_mem_long(&regs.prefetch) , regs.prefetch_pc);
-	uae_u32 opcode = get_iword_prefetch (0);
+	regs.opcode = get_iword_prefetch (0);
 
 	if (regs.spcflags & SPCFLAG_BUSERROR)
 	{
@@ -1752,7 +1759,7 @@ static void m68k_run_1 (void)
 	    Exception(2,0,M68000_EXC_SRC_CPU);
 
 	    /* Get opcode for bus error handler and check other special bits */
-	    opcode = get_iword_prefetch (0);
+	    regs.opcode = get_iword_prefetch (0);
 	    if (regs.spcflags) {
 		if (do_specialties ())
 		    return;
@@ -1783,15 +1790,15 @@ static void m68k_run_1 (void)
 	/* assert (!regs.stopped && !(regs.spcflags & SPCFLAG_STOP)); */
 /*	regs_backup[backup_pointer = (backup_pointer + 1) % 16] = regs;*/
 #if COUNT_INSTRS == 2
-	if (table68k[opcode].handler != -1)
-	    instrcount[table68k[opcode].handler]++;
+	if (table68k[regs.opcode].handler != -1)
+	    instrcount[table68k[regs.opcode].handler]++;
 #elif COUNT_INSTRS == 1
-	instrcount[opcode]++;
+	instrcount[regs.opcode]++;
 #endif
 
 	/* In case of a Bus Error, we need the PC of the instruction that caused */
 	/* the error to build the exception stack frame */
-	BusErrorPC = m68k_getpc();
+	regs.instruction_pc = m68k_getpc();
 
 	if (bDspEnabled)
 	    Cycles_SetCounter(CYCLES_COUNTER_CPU, 0);	/* to measure the total number of cycles spent in the cpu */
@@ -1800,7 +1807,7 @@ static void m68k_run_1 (void)
 	//if ( CAPSGetDebugRequest() )
 	//  DebugUI(REASON_CPU_BREAKPOINT);
 
-	cycles = (*cpufunctbl[opcode])(opcode);
+	cycles = (*cpufunctbl[regs.opcode])(regs.opcode);
 //fprintf (stderr, "ir out %x %x\n",do_get_mem_long(&regs.prefetch) , regs.prefetch_pc);
 
 #ifdef DEBUG_PREFETCH
@@ -1812,11 +1819,11 @@ static void m68k_run_1 (void)
 #endif
 
 	M68000_AddCyclesWithPairing(cycles);
-	if (regs.spcflags & SPCFLAG_EXTRA_CYCLES) {
+
+        if ( WaitStateCycles ) {
 	  /* Add some extra cycles to simulate a wait state */
-	  unset_special(SPCFLAG_EXTRA_CYCLES);
-	  M68000_AddCycles(nWaitStateCycles);
-	  nWaitStateCycles = 0;
+	  M68000_AddCycles(WaitStateCycles);
+	  WaitStateCycles = 0;
 	}
 
 	/* We can have several interrupts at the same time before the next CPU instruction */
@@ -1829,7 +1836,7 @@ static void m68k_run_1 (void)
 	    while ( ( PendingInterruptCount <= 0 ) && ( PendingInterruptFunction ) && ( ( regs.spcflags & SPCFLAG_STOP ) == 0 ) )
 		CALL_VAR ( PendingInterruptFunction );		/* call the interrupt's handler */
 	    if ( MFP_UpdateNeeded == true )
-		MFP_UpdateIRQ ( 0 );				/* update MFP's state if some internal timers related to MFP expired */
+		MFP_UpdateIRQ_All ( 0 );			/* update MFP's state if some internal timers related to MFP expired */
 	}
 
 	if (regs.spcflags) {
@@ -1839,7 +1846,7 @@ static void m68k_run_1 (void)
 
 	/* Run DSP 56k code if necessary */
 	if (bDspEnabled) {
-	    DSP_Run( Cycles_GetCounter(CYCLES_COUNTER_CPU) * 2);
+	    DSP_Run( Cycles_GetCounter(CYCLES_COUNTER_CPU) * DSP_CPU_FREQ_RATIO);
 	}
     }
 }
@@ -1850,7 +1857,8 @@ static void m68k_run_2 (void)
 {
     for (;;) {
 	int cycles;
-	uae_u32 opcode = get_iword (0);
+
+	regs.opcode = get_iword (0);
 
 	/*m68k_dumpstate(stderr, NULL);*/
 	if (LOG_TRACE_LEVEL(TRACE_CPU_DISASM))
@@ -1866,27 +1874,27 @@ static void m68k_run_2 (void)
 	/* assert (!regs.stopped && !(regs.spcflags & SPCFLAG_STOP)); */
 /*	regs_backup[backup_pointer = (backup_pointer + 1) % 16] = regs;*/
 #if COUNT_INSTRS == 2
-	if (table68k[opcode].handler != -1)
-	    instrcount[table68k[opcode].handler]++;
+	if (table68k[regs.opcode].handler != -1)
+	    instrcount[table68k[regs.opcode].handler]++;
 #elif COUNT_INSTRS == 1
-	instrcount[opcode]++;
+	instrcount[regs.opcode]++;
 #endif
 
 	/* In case of a Bus Error, we need the PC of the instruction that caused */
 	/* the error to build the exception stack frame */
-	BusErrorPC = m68k_getpc();
+	regs.instruction_pc = m68k_getpc();
 
-	cycles = (*cpufunctbl[opcode])(opcode);
+	cycles = (*cpufunctbl[regs.opcode])(regs.opcode);
 
 	if (bDspEnabled)
 	    Cycles_SetCounter(CYCLES_COUNTER_CPU, 0);	/* to measure the total number of cycles spent in the cpu */
 
 	M68000_AddCycles(cycles);
-	if (regs.spcflags & SPCFLAG_EXTRA_CYCLES) {
+
+        if ( WaitStateCycles ) {
 	  /* Add some extra cycles to simulate a wait state */
-	  unset_special(SPCFLAG_EXTRA_CYCLES);
-	  M68000_AddCycles(nWaitStateCycles);
-	  nWaitStateCycles = 0;
+	  M68000_AddCycles(WaitStateCycles);
+	  WaitStateCycles = 0;
 	}
 
         if ( PendingInterruptCount <= 0 )
@@ -1894,7 +1902,7 @@ static void m68k_run_2 (void)
 	    while ( ( PendingInterruptCount <= 0 ) && ( PendingInterruptFunction ) )
 		CALL_VAR(PendingInterruptFunction);
 	    if ( MFP_UpdateNeeded == true )
-		MFP_UpdateIRQ ( 0 );
+		MFP_UpdateIRQ_All ( 0 );
 	}
 
 	if (regs.spcflags) {
@@ -1904,7 +1912,7 @@ static void m68k_run_2 (void)
 
 	/* Run DSP 56k code if necessary */
 	if (bDspEnabled) {
-	    DSP_Run( Cycles_GetCounter(CYCLES_COUNTER_CPU) );
+	    DSP_Run( Cycles_GetCounter(CYCLES_COUNTER_CPU) * DSP_CPU_FREQ_RATIO);
 	}
     }
 }

@@ -6,7 +6,7 @@
 
   scandir function for BEOS, SunOS etc..
 */
-const char ScanDir_fileid[] = "Hatari scandir.c : " __DATE__ " " __TIME__;
+const char ScanDir_fileid[] = "Hatari scandir.c";
 
 #include <string.h>
 #include <stdio.h>
@@ -37,61 +37,6 @@ int alphasort(const struct dirent **d1, const struct dirent **d2)
 
 
 #if !HAVE_SCANDIR
-
-#if defined(WIIU) || defined(VITA)
-int scandir(const char *dirp, struct dirent ***namelist,
-              int (*filter)(const struct dirent *),
-              int (*compar)(const struct dirent **, const struct dirent **))
-
-{
-    DIR *dp = opendir (dirp);
-    struct dirent *current;
-    struct dirent **names = NULL;
-    size_t names_size = 0, pos;
-    int save;
-
-    if (dp == NULL)
-        return -1;
-
-    //printf("mm(%s)\n",dirp);
-    pos = 0;
-    while ((current = readdir (dp)) != NULL)
-        if (filter == NULL || (*filter) (current))
-        {
-            struct dirent *vnew;
-            size_t dsize;
-
-            if (pos == names_size)
-            {
-                struct dirent **new;
-                if (names_size == 0)
-                    names_size = 10;
-                else
-                    names_size *= 2;
-                new = (struct dirent **) realloc (names, names_size * sizeof (struct dirent *));
-                if (new == NULL)
-                    break;
-                names = new;
-            }
-
-            dsize = &current->d_name[strlen(current->d_name)+1] - (char *) current;
-            vnew = (struct dirent *) malloc (dsize);
-            if (vnew == NULL)
-                break;
-
-            names[pos++] = (struct dirent *) memcpy (vnew, current, dsize);
-        }
-
-    closedir (dp);
-
-
-    /* Sort the list if we have a comparison function to sort with.  */
-    if (compar != NULL)
-        qsort (names, pos, sizeof (struct dirent *), compar);
-    *namelist = names;
-    return pos;
-}
-#else
 
 #undef DIRSIZ
 #define DIRSIZ(dp)                                          \
@@ -200,7 +145,6 @@ error_out:
 		closedir(dirp);
 	return -1;
 }
-#endif /* WIIU */
 #endif	/* !HAVE_SCANDIR */
 
 
@@ -246,7 +190,7 @@ int scandir(const char *dirname, struct dirent ***namelist,
 		return -1;
 
 	strcpy(findIn, dirname);
-	Log_Printf(LOG_DEBUG, "scandir : findIn orign='%s'\n", findIn);
+	Log_Printf(LOG_DEBUG, "scandir : findIn origin='%s'\n", findIn);
 
 	for (d = findIn; *d; d++)
 		if (*d=='/')
@@ -316,8 +260,7 @@ int scandir(const char *dirname, struct dirent ***namelist,
 				struct dirent **tempDir = (struct dirent **)calloc(sizeof(struct dirent*), NDir+33);
 				if (NDir)
 					memcpy(tempDir, dir, sizeof(struct dirent*)*NDir);
-				if (dir)
-					free(dir);
+				free(dir);
 				dir = tempDir;
 				NDir += 32;
 			}

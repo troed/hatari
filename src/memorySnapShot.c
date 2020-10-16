@@ -16,7 +16,7 @@
   reduce redundancy and the function 'MemorySnapShot_Store' decides if it
   should save or restore the data.
 */
-const char MemorySnapShot_fileid[] = "Hatari memorySnapShot.c : " __DATE__ " " __TIME__;
+const char MemorySnapShot_fileid[] = "Hatari memorySnapShot.c";
 
 #include <SDL_types.h>
 #include <errno.h>
@@ -41,21 +41,25 @@ const char MemorySnapShot_fileid[] = "Hatari memorySnapShot.c : " __DATE__ " " _
 #include "m68000.h"
 #include "memorySnapShot.h"
 #include "mfp.h"
+#include "midi.h"
 #include "psg.h"
 #include "reset.h"
+#include "scc.h"
 #include "sound.h"
 #include "str.h"
 #include "stMemory.h"
 #include "tos.h"
 #include "screen.h"
+#include "screenConvert.h"
 #include "video.h"
 #include "falcon/dsp.h"
 #include "falcon/crossbar.h"
 #include "falcon/videl.h"
 #include "statusbar.h"
+#include "hatari-glue.h"
 
 
-#define VERSION_STRING      "1.8.1"   /* Version number of compatible memory snapshots - Always 6 bytes (inc' NULL) */
+#define VERSION_STRING      "2.3.0"   /* Version number of compatible memory snapshots - Always 6 bytes (inc' NULL) */
 #define SNAPSHOT_MAGIC      0xDeadBeef
 
 #if HAVE_LIBZ
@@ -78,6 +82,10 @@ typedef FILE* MSS_File;
 
 static MSS_File CaptureFile;
 static bool bCaptureSave, bCaptureError;
+
+
+static char Temp_FileName[FILENAME_MAX];
+static bool Temp_Confirm;
 
 
 /*-----------------------------------------------------------------------*/
@@ -155,7 +163,7 @@ static int MemorySnapShot_fseek(MSS_File fhndl, int pos)
  * Open/Create snapshot file, and set flag so 'MemorySnapShot_Store' knows
  * how to handle data.
  */
-static bool MemorySnapShot_OpenFile(const char *pszFileName, bool bSave)
+static bool MemorySnapShot_OpenFile(const char *pszFileName, bool bSave, bool bConfirm)
 {
 	char VersionString[] = VERSION_STRING;
 #if ENABLE_WINUAE_CPU
@@ -173,15 +181,17 @@ static bool MemorySnapShot_OpenFile(const char *pszFileName, bool bSave)
 	 */
 	if (bSave)
 	{
-		if (!File_QueryOverwrite(pszFileName))
+		if (bConfirm && !File_QueryOverwrite(pszFileName))
+		{
+			/* info for debugger invocation */
+			Log_Printf(LOG_INFO, "Save canceled.");
 			return false;
-
+		}
 		/* Save */
 		CaptureFile = MemorySnapShot_fopen(pszFileName, "wb");
 		if (!CaptureFile)
 		{
-			fprintf(stderr, "Failed to open save file '%s': %s\n",
-			        pszFileName, strerror(errno));
+			Log_Printf(LOG_WARN, "Save file open error: %s",strerror(errno));
 			bCaptureError = true;
 			return false;
 		}
@@ -198,8 +208,7 @@ static bool MemorySnapShot_OpenFile(const char *pszFileName, bool bSave)
 		CaptureFile = MemorySnapShot_fopen(pszFileName, "rb");
 		if (!CaptureFile)
 		{
-			fprintf(stderr, "Failed to open file '%s': %s\n",
-			        pszFileName, strerror(errno));
+			Log_Printf(LOG_WARN, "File open error: %s", strerror(errno));
 			bCaptureError = true;
 			return false;
 		}
@@ -295,10 +304,47 @@ void MemorySnapShot_Store(void *pData, int Size)
  */
 void MemorySnapShot_Capture(const char *pszFileName, bool bConfirm)
 {
+//fprintf ( stderr , "MemorySnapShot_Capture in\n" );
+	/* Make a temporary copy of the parameters for MemorySnapShot_Capture_Do() */
+	strlcpy ( Temp_FileName , pszFileName , FILENAME_MAX );
+	Temp_Confirm = bConfirm;
+
+#ifndef WINUAE_FOR_HATARI
+	/* With old cpu core, capture is immediate */
+	MemorySnapShot_Capture_Do ();
+#else
+	/* With WinUAE cpu core, capture is done from m68k_run_xxx() after the end of the current instruction */
+	UAE_Set_State_Save ();
+#endif
+//fprintf ( stderr , "MemorySnapShot_Capture out\n" );
+}
+
+
+
+/*
+ * Same as MemorySnapShot_Capture, but snapshot is saved immediately
+ * without restarting emulation (used in the debugger)
+ */
+void MemorySnapShot_Capture_Immediate(const char *pszFileName, bool bConfirm)
+{
+	/* Make a temporary copy of the parameters for MemorySnapShot_Capture_Do() */
+	strlcpy ( Temp_FileName , pszFileName , FILENAME_MAX );
+	Temp_Confirm = bConfirm;
+
+	MemorySnapShot_Capture_Do ();
+}
+
+
+
+/*
+ * Do the real saving (called from newcpu.c / m68k_go()
+ */
+void MemorySnapShot_Capture_Do(void)
+{
 	Uint32 magic = SNAPSHOT_MAGIC;
 
 	/* Set to 'saving' */
-	if (MemorySnapShot_OpenFile(pszFileName, true))
+	if (MemorySnapShot_OpenFile(Temp_FileName, true, Temp_Confirm))
 	{
 		/* Capture each files details */
 		Configuration_MemorySnapShot_Capture(true);
@@ -312,6 +358,7 @@ void MemorySnapShot_Capture(const char *pszFileName, bool bConfirm)
 		GemDOS_MemorySnapShot_Capture(true);
 		ACIA_MemorySnapShot_Capture(true);
 		IKBD_MemorySnapShot_Capture(true);
+		MIDI_MemorySnapShot_Capture(true);
 		CycInt_MemorySnapShot_Capture(true);
 		M68000_MemorySnapShot_Capture(true);
 		MFP_MemorySnapShot_Capture(true);
@@ -323,8 +370,11 @@ void MemorySnapShot_Capture(const char *pszFileName, bool bConfirm)
 		Crossbar_MemorySnapShot_Capture(true);
 		VIDEL_MemorySnapShot_Capture(true);
 		DSP_MemorySnapShot_Capture(true);
-		DebugUI_MemorySnapShot_Capture(pszFileName, true);
+		DebugUI_MemorySnapShot_Capture(Temp_FileName, true);
 		IoMem_MemorySnapShot_Capture(true);
+		ScreenConv_MemorySnapShot_Capture(true);
+		SCC_MemorySnapShot_Capture(true);
+
 		/* end marker */
 		MemorySnapShot_Store(&magic, sizeof(magic));
 		/* And close */
@@ -337,9 +387,11 @@ void MemorySnapShot_Capture(const char *pszFileName, bool bConfirm)
 
 	/* Did error */
 	if (bCaptureError)
-		Log_AlertDlg(LOG_ERROR, "Unable to save memory state to file.");
-	else if (bConfirm)
-		Log_AlertDlg(LOG_INFO, "Memory state file saved.");
+		Log_AlertDlg(LOG_ERROR, "Unable to save memory state to file: %s", Temp_FileName);
+	else if (Temp_Confirm)
+		Log_AlertDlg(LOG_INFO, "Memory state file saved: %s", Temp_FileName);
+	else
+		Log_Printf(LOG_INFO, "Memory state file saved: %s", Temp_FileName);
 }
 
 
@@ -349,13 +401,46 @@ void MemorySnapShot_Capture(const char *pszFileName, bool bConfirm)
  */
 void MemorySnapShot_Restore(const char *pszFileName, bool bConfirm)
 {
+//fprintf ( stderr , "MemorySnapShot_Restore in\n" );
+	/* Make a temporary copy of the parameters for MemorySnapShot_Restore_Do() */
+	strlcpy ( Temp_FileName , pszFileName , FILENAME_MAX );
+	Temp_Confirm = bConfirm;
+
+#ifndef WINUAE_FOR_HATARI
+	/* With old cpu core, restore is immediate */
+	MemorySnapShot_Restore_Do ();
+#else
+	/* With WinUAE cpu core, restore is done from m68k_go() after the end of the current instruction */
+	UAE_Set_State_Restore ();
+	UAE_Set_Quit_Reset ( false );					/* Ask for "quit" to start restoring state */
+	set_special(SPCFLAG_MODE_CHANGE);				/* exit m68k_run_xxx() loop and check "quit" */
+#endif
+//fprintf ( stderr , "MemorySnapShot_Restore out\n" );
+}
+
+
+
+/*
+ * Do the real restoring (called from newcpu.c / m68k_go()
+ */
+void MemorySnapShot_Restore_Do(void)
+{
 	Uint32 magic;
 
+//fprintf ( stderr , "MemorySnapShot_Restore_Do in\n" );
 	/* Set to 'restore' */
-	if (MemorySnapShot_OpenFile(pszFileName, false))
+	if (MemorySnapShot_OpenFile(Temp_FileName, false, Temp_Confirm))
 	{
 		Configuration_MemorySnapShot_Capture(false);
 		TOS_MemorySnapShot_Capture(false);
+
+		/* FIXME [NP] : Reset_Cold calls TOS_InitImage which calls */
+		/* memory_init. memory_init allocs STRam and TTRam, but TTRam */
+		/* requires currprefs.address_space_24 which is not restored yet */
+		/* (it's from M68000_MemorySnapShot_Capture). To resolve this */
+		/* circular dependency, we init currprefs.address_space_24 here */
+		/* This should be split in different functions / order to avoid this loop */
+		currprefs.address_space_24 = ConfigureParams.System.bAddressSpace24;
 
 		/* Reset emulator to get things running */
 		IoMem_UnInit();  IoMem_Init();
@@ -371,6 +456,7 @@ void MemorySnapShot_Restore(const char *pszFileName, bool bConfirm)
 		GemDOS_MemorySnapShot_Capture(false);
 		ACIA_MemorySnapShot_Capture(false);
 		IKBD_MemorySnapShot_Capture(false);			/* After ACIA */
+		MIDI_MemorySnapShot_Capture(false);
 		CycInt_MemorySnapShot_Capture(false);
 		M68000_MemorySnapShot_Capture(false);
 		MFP_MemorySnapShot_Capture(false);
@@ -382,8 +468,10 @@ void MemorySnapShot_Restore(const char *pszFileName, bool bConfirm)
 		Crossbar_MemorySnapShot_Capture(false);
 		VIDEL_MemorySnapShot_Capture(false);
 		DSP_MemorySnapShot_Capture(false);
-		DebugUI_MemorySnapShot_Capture(pszFileName, false);
+		DebugUI_MemorySnapShot_Capture(Temp_FileName, false);
 		IoMem_MemorySnapShot_Capture(false);
+		ScreenConv_MemorySnapShot_Capture(false);
+		SCC_MemorySnapShot_Capture(false);
 
 		/* version string check catches release-to-release
 		 * state changes, bCaptureError catches too short
@@ -406,11 +494,15 @@ void MemorySnapShot_Restore(const char *pszFileName, bool bConfirm)
 		}
 	}
 
+//fprintf ( stderr , "MemorySnapShot_Restore_Do out\n" );
+
 	/* Did error? */
 	if (bCaptureError)
-		Log_AlertDlg(LOG_ERROR, "Unable to restore memory state from file.");
-	else if (bConfirm)
-		Log_AlertDlg(LOG_INFO, "Memory state file restored.");
+		Log_AlertDlg(LOG_ERROR, "Unable to restore memory state from file: %s", Temp_FileName);
+	else if (Temp_Confirm)
+		Log_AlertDlg(LOG_INFO, "Memory state file restored: %s", Temp_FileName);
+	else
+		Log_Printf(LOG_INFO, "Memory state file restored: %s", Temp_FileName);
 }
 
 
@@ -421,20 +513,41 @@ void MemorySnapShot_Restore(const char *pszFileName, bool bConfirm)
  */
 #include <savestate.h>
 
+void save_u64(uae_u64 data)
+{
+	MemorySnapShot_Store(&data, 8);
+}
+
 void save_u32(uae_u32 data)
 {
 	MemorySnapShot_Store(&data, 4);
+//printf ("s32 %x\n", data);
 }
 
 void save_u16(uae_u16 data)
 {
 	MemorySnapShot_Store(&data, 2);
+//printf ("s16 %x\n", data);
+}
+
+void save_u8(uae_u8 data)
+{
+	MemorySnapShot_Store(&data, 1);
+//printf ("s8 %x\n", data);
+}
+
+uae_u64 restore_u64(void)
+{
+	uae_u64 data;
+	MemorySnapShot_Store(&data, 8);
+	return data;
 }
 
 uae_u32 restore_u32(void)
 {
 	uae_u32 data;
 	MemorySnapShot_Store(&data, 4);
+//printf ("r32 %x\n", data);
 	return data;
 }
 
@@ -442,5 +555,15 @@ uae_u16 restore_u16(void)
 {
 	uae_u16 data;
 	MemorySnapShot_Store(&data, 2);
+//printf ("r16 %x\n", data);
 	return data;
 }
+
+uae_u8 restore_u8(void)
+{
+	uae_u8 data;
+	MemorySnapShot_Store(&data, 1);
+//printf ("r8 %x\n", data);
+	return data;
+}
+

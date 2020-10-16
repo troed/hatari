@@ -21,7 +21,7 @@
   TRACK 2, SIDE 0
   TRACK 2, SIDE 1
 */
-const char ST_fileid[] = "Hatari st.c : " __DATE__ " " __TIME__;
+const char ST_fileid[] = "Hatari st.c";
 
 #include "main.h"
 #include "file.h"
@@ -62,7 +62,7 @@ Uint8 *ST_ReadDisk(int Drive, const char *pszFileName, long *pImageSize, int *pI
 	*pImageSize = 0;
 
 	/* Just load directly a buffer, and set ImageSize accordingly */
-	pStFile = HFile_Read(pszFileName, pImageSize, NULL);
+	pStFile = File_Read(pszFileName, pImageSize, NULL);
 	if (!pStFile)
 	{
 		*pImageSize = 0;

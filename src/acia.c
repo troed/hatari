@@ -3,13 +3,13 @@
 
   Copyright (C) 2012 by Nicolas Pomarède
 
-  This file is distributed under the GNU Public License, version 2 or at
-  your option any later version. Read the file gpl.txt for details.
+  This file is distributed under the GNU General Public License, version 2
+  or at your option any later version. Read the file gpl.txt for details.
 
   MC6850 ACIA emulation.
 */
 
-const char ACIA_fileid[] = "Hatari acia.c : " __DATE__ " " __TIME__;
+const char ACIA_fileid[] = "Hatari acia.c";
 
 
 /* 2012/09/28	[NP]	Start of the full rewrite of the MC6850 ACIA emulation, using the official	*/
@@ -24,7 +24,7 @@ const char ACIA_fileid[] = "Hatari acia.c : " __DATE__ " " __TIME__;
 
 
 /*
-  6850 ACIA (Asynchronous Communications Inferface Apdater)
+  6850 ACIA (Asynchronous Communications Interface Adapter)
 
   References :
    - MC6850 datasheet by Motorola (DS9493R4, 1985)
@@ -34,8 +34,23 @@ const char ACIA_fileid[] = "Hatari acia.c : " __DATE__ " " __TIME__;
    - MAME's 6850acia.c for RTS, CTS and DCD behaviour
 
 
+                                       -----------
+                                  VSS -| 1    24 |- CTS(INV) : connected to GND
+     RX DATA : connected to MIDI/IKBD -| 2    23 |- DCD(INV) : connected to GND
+        RX CLK : connected to 500 kHz -| 3    22 |- D0
+        TX CLK : connected to 500 kHz -| 4    21 |- D1
+             RTS(INV) : not connected -| 5    20 |- D2
+     TX DATA : connected to MIDI/IKBD -| 6    19 |- D3
+    IRQ(INV) : connected to MFP GPIP4 -| 7    18 |- D4
+                                  CS0 -| 8    17 |- D5
+                             CS2(INV) -| 9    16 |- D6
+                                  CS1 -| 10   15 |- D7
+                                   RS -| 11   14 |- E
+                                  VCC -| 12   13 |- R/W(INV)
+                                       -----------
+
   Pins :
-    Vss
+    VSS
     RX DATA Receive Data
     RX CLK Receive Clock
     TX CLK Transmitter Clock
@@ -52,10 +67,10 @@ const char ACIA_fileid[] = "Hatari acia.c : " __DATE__ " " __TIME__;
     CTS Clear To Send
 
   Registers :
-    0xfffc00 Keyboard ACIA Control (write)/Status(read)
-    0xfffc02 Keyboard ACIA Data
-    0xfffc04 MIDI ACIA Control (write)/Status(read)
-    0xfffc06 MIDI ACIA Data
+    0xfffc00.b	Keyboard ACIA Control (write) / Status(read)
+    0xfffc02.b	Keyboard ACIA Data
+    0xfffc04.b	MIDI ACIA Control (write) / Status(read)
+    0xfffc06.b	MIDI ACIA Data
 
   Control Register (0xfffc00 write) :
     Bits 0,1 - These bits determine by which factor the transmitter and receiver
@@ -71,13 +86,13 @@ const char ACIA_fileid[] = "Hatari acia.c : " __DATE__ " " __TIME__;
     Bits 5,6 - These Transmitter Control bits set the RTS output pin, and allow or prevent
       an interrupt through the ACIA when the send register is emptied. Also, BREAK signals
       can be sent over the serial output by this line. A BREAK signal is nothing more than
-      a long seqence of null bits
+      a long sequence of null bits
         0 0    RTS low, transmitter IRQ disabled
         0 1    RTS low, transmitter IRQ enabled
         1 0    RTS high, transmitter IRQ disabled
         1 1    RTS low, transmitter IRQ disabled, BREAK sent
     Bit 7 - The Receiver Interrupt Enable bit determines whether the receiver interrupt
-      will be on. An interrupt can be caused by the DCD line chaning from low to high, or
+      will be on. An interrupt can be caused by the DCD line changing from low to high, or
       by the receiver data buffer filling. Besides that, an interrupt can occur from an
       OVERRUN (a received character isn't properly read from the processor).
         0 Interrupt disabled
@@ -92,7 +107,7 @@ const char ACIA_fileid[] = "Hatari acia.c : " __DATE__ " " __TIME__;
       is cancelled. The bit is cleared when the status register and the receiver register are
       read. This also cancels the IRQ. Bit 2 register remains highis the signal on the DCD pin
       is still high; Bit 2 register low if DCD becomes low.
-    Bit 3 - This line shows the status of CTS. This signal cannot be altered by a mater reset,
+    Bit 3 - This line shows the status of CTS. This signal cannot be altered by a master reset,
       or by ACIA programming.
     Bit 4 - Shows 'Frame Errors'. Frame errors are when no stop-bit is recognized in receiver
       switching. It can be set with every new character.
@@ -165,8 +180,7 @@ const char ACIA_fileid[] = "Hatari acia.c : " __DATE__ " " __TIME__;
 #define	ACIA_CR_RECEIVE_INTERRUPT_ENABLE( CR )	( ( CR >> 7 ) & 0x01 )	/* CR7 : Receive interrupt enable */
 
 
-
-int	ACIA_Counter_Divide[ 3 ] = { 1 , 16 , 64 };		/* Used to divide txclock/rxclock to get the correct baud rate */
+static const int ACIA_Counter_Divide[3] = { 1 , 16 , 64 };	/* Used to divide txclock/rxclock to get the correct baud rate */
 
 
 /* Data size, parity and stop bits used for the transfer depending on CR_WORD_SELECT */
@@ -351,8 +365,8 @@ void	ACIA_MemorySnapShot_Capture ( bool bSave )
 /**
  * Set or reset the ACIA's IRQ signal.
  * IRQ signal is inverted (0/low sets irq, 1/high resets irq)
- * In the ST, the 2 ACIA's IRQ pins are connected to the same MFP pin,
- * so they share the same IRQ bit in the MFP.
+ * In the ST, the 2 ACIA's IRQ pins are connected to the same MFP input,
+ * so they share the same IRQ bit in GPIP4.
  */
 static void	ACIA_Set_Line_IRQ_MFP ( int bit )
 {
@@ -364,14 +378,11 @@ static void	ACIA_Set_Line_IRQ_MFP ( int bit )
 		* the irq bit is set and the MFP interrupt is triggered - for example
 		* the "V8 music system" demo depends on this behaviour.
 		* This 4 cycle delay is handled in mfp.c */
-
-		MFP_GPIP &= ~0x10;				/* set IRQ signal for GPIP P4 */
-		MFP_InputOnChannel ( MFP_INT_ACIA , 0 );
+		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_ACIA , MFP_GPIP_STATE_LOW );
 	}
 	else
 	{
-		/* GPIP I4 - General Purpose Pin Keyboard/MIDI interrupt */
-		MFP_GPIP |= 0x10;				/* IRQ bit was reset */
+		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_ACIA , MFP_GPIP_STATE_HIGH );
 	}
 }
 
@@ -443,9 +454,8 @@ static void	ACIA_Set_Timers_IKBD ( void *pACIA )
  * (with cpu running at 8 MHz)
  * InternalCycleOffset allows to compensate for a != 0 value in PendingInterruptCount
  * to keep a constant baud rate.
- * TODO : we use a fixed 8 MHz clock and nCpuFreqShift to convert cycles for our
- * internal timers in cycInt.c. This should be replaced some days by using
- * MachineClocks.CPU_Freq and not using nCpuFreqShift anymore.
+ * TODO : we use a fixed 8 MHz clock to convert cycles for our internal timers
+ * in cycInt.c. This should be replaced some days by using MachineClocks.CPU_Freq.
  */
 static void	ACIA_Start_InterruptHandler_IKBD ( ACIA_STRUCT *pACIA , int InternalCycleOffset )
 {
@@ -455,12 +465,11 @@ static void	ACIA_Start_InterruptHandler_IKBD ( ACIA_STRUCT *pACIA , int Internal
 //	Cycles = MachineClocks.CPU_Freq / pACIA->TX_Clock;		/* Convert ACIA cycles in CPU cycles */
 	Cycles = 8021247 / pACIA->TX_Clock;				/* Convert ACIA cycles in CPU cycles, for a 8 MHz STF reference */
 	Cycles *= pACIA->Clock_Divider;
-	Cycles <<= nCpuFreqShift;					/* Compensate for x2 or x4 cpu speed */
 
 	LOG_TRACE ( TRACE_ACIA, "acia %s start timer divider=%d cpu_cycles=%d VBL=%d HBL=%d\n" , pACIA->ACIA_Name ,
 		pACIA->Clock_Divider , Cycles , nVBLs , nHBL );
 
-	CycInt_AddRelativeInterruptWithOffset ( Cycles, INT_CPU_CYCLE, INTERRUPT_ACIA_IKBD , InternalCycleOffset );
+	CycInt_AddRelativeInterruptWithOffset ( Cycles, INT_CPU8_CYCLE, INTERRUPT_ACIA_IKBD , InternalCycleOffset );
 }
 
 
@@ -532,8 +541,8 @@ void	ACIA_AddWaitCycles ( void )
 	/* Wait for E clock only if this is the first ACIA access for this instruction */
 	/* (NOTE : in UAE, movep behaves like several bytes access with different IoAccessBaseAddress, */
 	/* so only the first movep's access should wait for E Clock) */
-	if ( ( ( MovepByteNbr == 0 ) && ( IoAccessBaseAddress == IoAccessCurrentAddress ) )
-	  || ( MovepByteNbr == 1 ) )					/* First access of a movep */
+	if ( ( ( IoAccessInstrCount == 0 ) && ( IoAccessBaseAddress == IoAccessCurrentAddress ) )
+	  || ( IoAccessInstrCount == 1 ) )				/* First access of a movep */
 		cycles += M68000_WaitEClock ();
 	
 	M68000_WaitState ( cycles );
@@ -1123,4 +1132,12 @@ static void	ACIA_Clock_RX ( ACIA_STRUCT *pACIA )
 }
 
 
-
+void ACIA_Info(FILE *fp, Uint32 dummy)
+{
+	fprintf(fp, "Keyboard ACIA:\n");
+	fprintf(fp, "- Control / status: 0x%02x\n", IoMem[0xfffc00]);
+	fprintf(fp, "- Data: 0x%02x\n", IoMem[0xfffc02]);
+	fprintf(fp, "MIDI ACIA:\n");
+	fprintf(fp, "- Control / status: 0x%02x\n", IoMem[0xfffc04]);
+	fprintf(fp, "- Data: 0x%02x\n", IoMem[0xfffc06]);
+}

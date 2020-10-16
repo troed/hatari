@@ -10,7 +10,7 @@
   this also allow us to detect when the stream goes into idle - at which point
   we close the file/printer.
 */
-const char Printer_fileid[] = "Hatari printer.c : " __DATE__ " " __TIME__;
+const char Printer_fileid[] = "Hatari printer.c";
 
 #include "main.h"
 #include "configuration.h"
@@ -45,7 +45,8 @@ void Printer_Init(void)
 	Dprintf((stderr, "Printer_Init()\n"));
 
 	/* disabled from config/command line? */
-	if (!ConfigureParams.Printer.szPrintToFileName[0])
+	if (!ConfigureParams.Printer.bEnablePrinting ||
+	    !ConfigureParams.Printer.szPrintToFileName[0])
 		return;
 
 	/* printer name without path? */
@@ -73,7 +74,7 @@ void Printer_UnInit(void)
 	Dprintf((stderr, "Printer_UnInit()\n"));
 
 	/* Close any open files */
-	pPrinterHandle = HFile_Close(pPrinterHandle);
+	pPrinterHandle = File_Close(pPrinterHandle);
 	bUnflushed = false;
 	nIdleCount = 0;
 }
@@ -95,7 +96,7 @@ bool Printer_TransferByteTo(Uint8 Byte)
 	if (!pPrinterHandle)
 	{
 		/* open printer file... */
-		pPrinterHandle = File_Open(ConfigureParams.Printer.szPrintToFileName, "a+");
+		pPrinterHandle = File_Open(ConfigureParams.Printer.szPrintToFileName, "a+b");
 		if (!pPrinterHandle)
 		{
 			Log_AlertDlg(LOG_ERROR, "Printer output file open failed. Printing disabled.");
@@ -105,7 +106,7 @@ bool Printer_TransferByteTo(Uint8 Byte)
 	}
 	if (fputc(Byte, pPrinterHandle) != Byte)
 	{
-		fprintf(stderr, "ERROR: Printer_TransferByteTo() writing failed!\n");
+		Log_Printf(LOG_ERROR, "Printer_TransferByteTo() writing failed!\n");
 		return false;
 	}
 	bUnflushed = true;

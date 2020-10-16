@@ -18,22 +18,24 @@ typedef struct {
 extern profile_loop_t profile_loop;
 
 typedef struct {
-	Uint64 calls, count, cycles, misses;
+	Uint64 calls, count, cycles; /* common counters between CPU & DSP */
+	Uint64 i_misses, d_hits;     /* CPU specific counters */
+	Uint64 cycles_diffs;         /* DSP specific counter, not updated at run-time */
 } counters_t;
 
 typedef struct {
 	int callee_idx;		/* index of called function */
 	Uint32 ret_addr;	/* address after returning from call */
-	Uint32 caller_addr;	/* remove informational caller address */
-	Uint32 callee_addr;	/* remove informational callee address */
+	Uint32 caller_addr;	/* caller address for callstack printing */
+	Uint32 callee_addr;	/* callee address for callstack printing */
 	counters_t all;		/* totals including everything called code does */
 	counters_t out;		/* totals for subcalls done from callee */
 } callstack_t;
 
 /* callee/caller information */
 typedef struct {
-	calltype_t   flags:8;	/* what kind of call it was */
-	unsigned int addr:24;	/* address for the caller */
+	calltype_t flags;	/* what kind of call it was */
+	Uint32 addr;		/* address for the caller */
 	Uint32 calls;		/* number of calls, exclusive */
 	counters_t all;		/* totals including everything called code does */
 	counters_t own;		/* totals excluding called code (=sum(all-out)) */
@@ -45,7 +47,7 @@ typedef struct {
 	caller_t *callers;	/* who called this address */
 } callee_t;
 
-/* impossible PC value, for unitialized PC values */
+/* impossible PC value, for uninitialized PC values */
 #define PC_UNDEFINED 0xFFFFFFFF
 
 typedef struct {
@@ -71,7 +73,8 @@ typedef struct {
 /* generic profile caller/callee info functions */
 extern void Profile_ShowCallers(FILE *fp, int sites, callee_t *callsite, const char * (*addr2name)(Uint32, Uint64 *));
 extern void Profile_CallStart(int idx, callinfo_t *callinfo, Uint32 prev_pc, calltype_t flag, Uint32 pc, counters_t *totalcost);
-extern void Profile_FinalizeCalls(callinfo_t *callinfo, counters_t *totalcost, const char* (get_symbol)(Uint32 addr));
+extern void Profile_FinalizeCalls(Uint32 pc, callinfo_t *callinfo, counters_t *totalcost,
+				  const char* (get_symbol)(Uint32, symtype_t), const char* (get_caller)(Uint32*));
 extern Uint32 Profile_CallEnd(callinfo_t *callinfo, counters_t *totalcost);
 extern int  Profile_AllocCallinfo(callinfo_t *callinfo, int count, const char *info);
 extern void Profile_FreeCallinfo(callinfo_t *callinfo);
@@ -80,20 +83,27 @@ extern bool Profile_LoopReset(void);
 /* parser helpers */
 extern void Profile_CpuGetPointers(bool **enabled, Uint32 **disasm_addr);
 extern void Profile_DspGetPointers(bool **enabled, Uint32 **disasm_addr);
-extern void Profile_CpuGetCallinfo(callinfo_t **callinfo, const char* (**get_symbol)(Uint32));
-extern void Profile_DspGetCallinfo(callinfo_t **callinfo, const char* (**get_symbol)(Uint32));
+extern void Profile_CpuGetCallinfo(callinfo_t **callinfo, const char* (**get_caller)(Uint32*), const char* (**get_symbol)(Uint32, symtype_t));
+extern void Profile_DspGetCallinfo(callinfo_t **callinfo, const char* (**get_caller)(Uint32*), const char* (**get_symbol)(Uint32, symtype_t));
+
+typedef enum {
+	PAGING_DISABLED,
+	PAGING_ENABLED
+} paging_t;
 
 /* internal CPU profile results */
-extern Uint32 Profile_CpuShowAddresses(Uint32 lower, Uint32 upper, FILE *out);
+extern Uint32 Profile_CpuShowAddresses(Uint32 lower, Uint32 upper, FILE *out, paging_t use_paging);
 extern void Profile_CpuShowCounts(int show, bool only_symbols);
 extern void Profile_CpuShowCycles(int show);
-extern void Profile_CpuShowMisses(int show);
+extern void Profile_CpuShowInstrMisses(int show);
+extern void Profile_CpuShowDataHits(int show);
+extern void Profile_CpuShowCaches(void);
 extern void Profile_CpuShowStats(void);
 extern void Profile_CpuShowCallers(FILE *fp);
 extern void Profile_CpuSave(FILE *out);
 
 /* internal DSP profile results */
-extern Uint16 Profile_DspShowAddresses(Uint32 lower, Uint32 upper, FILE *out);
+extern Uint16 Profile_DspShowAddresses(Uint32 lower, Uint32 upper, FILE *out, paging_t use_paging);
 extern void Profile_DspShowCounts(int show, bool only_symbols);
 extern void Profile_DspShowCycles(int show);
 extern void Profile_DspShowStats(void);

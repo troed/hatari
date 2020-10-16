@@ -2,7 +2,7 @@
 #
 # script to convert Devpac v3 symbol table for Hatari debugger.
 #
-# 2013 (C) Eero Tamminen, licenced under GPL v2+
+# 2013 (C) Eero Tamminen, licensed under GPL v2+
 
 usage ()
 {
@@ -45,7 +45,7 @@ awk '
 # - has problem that in Devpac output the offsets in
 #   the code listing part don't take includes into
 #   account i.e. they seem wrong
-#   
+#
 # works by:
 # - removing columns that confuse rest command line
 # - removing macro etc symbols at zero address

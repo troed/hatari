@@ -13,13 +13,14 @@
  * of LogTraceFlags. Multiple trace levels can be set at once, by setting
  * the corresponding bits in LogTraceFlags.
  */
-const char Log_fileid[] = "Hatari log.c : " __DATE__ " " __TIME__;
+const char Log_fileid[] = "Hatari log.c";
 
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <assert.h>
 
 #include "main.h"
 #include "configuration.h"
@@ -28,6 +29,7 @@ const char Log_fileid[] = "Hatari log.c : " __DATE__ " " __TIME__;
 #include "screen.h"
 #include "file.h"
 #include "vdi.h"
+#include "options.h"
 
 int ExceptionDebugMask;
 
@@ -46,6 +48,7 @@ static flagname_t ExceptionFlags[] = {
 	{ EXCEPT_CHK,       "chk" },
 	{ EXCEPT_TRAPV,     "trapv" },
 	{ EXCEPT_PRIVILEGE, "privilege" },
+	{ EXCEPT_TRACE,     "trace" },
 	{ EXCEPT_NOHANDLER, "nohandler" },
 
 	{ EXCEPT_DSP,       "dsp" },
@@ -83,6 +86,7 @@ static flagname_t TraceFlags[] = {
 	{ TRACE_CPU_PAIRING	 , "cpu_pairing" } ,
 	{ TRACE_CPU_DISASM	 , "cpu_disasm" } ,
 	{ TRACE_CPU_EXCEPTION	 , "cpu_exception" } ,
+	{ TRACE_CPU_REGS	 , "cpu_regs" } ,
 	{ TRACE_CPU_ALL 	 , "cpu_all" } ,
 
 	{ TRACE_INT		 , "int" } ,
@@ -140,6 +144,12 @@ static flagname_t TraceFlags[] = {
 
 	{ TRACE_IDE		 , "ide" } ,
 
+	{ TRACE_OS_BASE		 , "os_base" } ,
+
+	{ TRACE_SCSIDRV		 , "scsidrv" } ,
+
+	{ TRACE_MEM		 , "mem" } ,
+
 	{ TRACE_ALL		 , "all" }
 };
 #endif /* ENABLE_TRACING */
@@ -149,6 +159,8 @@ Uint64	LogTraceFlags = TRACE_NONE;
 FILE *TraceFile = NULL;
 
 static FILE *hLogFile = NULL;
+
+/* local settings, to be able change them temporarily */
 static LOGTYPE TextLogLevel;
 static LOGTYPE AlertDlgLogLevel;
 
@@ -160,6 +172,16 @@ void Log_Default(void)
 {
 	hLogFile = stderr;
 	TraceFile = stderr;
+	TextLogLevel = LOG_INFO;
+}
+
+/**
+ * Set local log levels from configuration values
+ */
+void Log_SetLevels(void)
+{
+	TextLogLevel = ConfigureParams.Log.nTextLogLevel;
+	AlertDlgLogLevel = ConfigureParams.Log.nAlertDlgLogLevel;
 }
 
 /*-----------------------------------------------------------------------*/
@@ -170,8 +192,7 @@ void Log_Default(void)
  */
 int Log_Init(void)
 {
-	TextLogLevel = ConfigureParams.Log.nTextLogLevel;
-	AlertDlgLogLevel = ConfigureParams.Log.nAlertDlgLogLevel;
+	Log_SetLevels();
 
 	hLogFile = File_Open(ConfigureParams.Log.sLogFileName, "w");
 	TraceFile = File_Open(ConfigureParams.Log.sTraceFileName, "w");
@@ -198,8 +219,22 @@ int Log_SetAlertLevel(int level)
  */
 void Log_UnInit(void)
 {
-	hLogFile = HFile_Close(hLogFile);
-	TraceFile = HFile_Close(TraceFile);
+	hLogFile = File_Close(hLogFile);
+	TraceFile = File_Close(TraceFile);
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Print log prefix when needed
+ */
+static void Log_PrintPrefix(FILE *fp, LOGTYPE idx)
+{
+	static const char* prefix[] = LOG_NAMES;
+
+	assert(idx >= 0 && idx < ARRAY_SIZE(prefix));
+	if (prefix[idx])
+		fprintf(fp, "%s: ", prefix[idx]);
 }
 
 
@@ -213,6 +248,7 @@ void Log_Printf(LOGTYPE nType, const char *psFormat, ...)
 
 	if (hLogFile && nType <= TextLogLevel)
 	{
+		Log_PrintPrefix(hLogFile, nType);
 		va_start(argptr, psFormat);
 		vfprintf(hLogFile, psFormat, argptr);
 		va_end(argptr);
@@ -234,6 +270,7 @@ void Log_AlertDlg(LOGTYPE nType, const char *psFormat, ...)
 	/* Output to log file: */
 	if (hLogFile && nType <= TextLogLevel)
 	{
+		Log_PrintPrefix(hLogFile, nType);
 		va_start(argptr, psFormat);
 		vfprintf(hLogFile, psFormat, argptr);
 		va_end(argptr);
@@ -295,11 +332,10 @@ LOGTYPE Log_ParseOptions(const char *arg)
 
 /*-----------------------------------------------------------------------*/
 /**
- * Parse a list of comma separated strings.
- * If the string is prefixed with an optional '+',
- * corresponding mask flag is turned on.
- * If the string is prefixed with a '-',
- * corresponding mask flag is turned off.
+ * Parse a list of comma separated strings:
+ * - Unless whole string is prefixed with '+'/'-', mask is initially zeroed
+ * - Optionally prefixing flag name with '+' turns given mask flag on
+ * - Prefixing flag name with '-' turns given mask flag off
  * Return error string (""=silent 'error') or NULL for success.
  */
 static const char*
@@ -309,6 +345,10 @@ Log_ParseOptionFlags (const char *FlagsStr, flagname_t *Flags, int MaxFlags, Uin
 	char *cur, *sep;
 	int i;
 	int Mode;				/* 0=add, 1=del */
+	enum {
+		FLAG_ADD,
+		FLAG_DEL
+	};
 	
 	/* special case for "help" : display the list of possible settings */
 	if (strcmp (FlagsStr, "help") == 0)
@@ -318,14 +358,20 @@ Log_ParseOptionFlags (const char *FlagsStr, flagname_t *Flags, int MaxFlags, Uin
 		for (i = 0; i < MaxFlags; i++)
 			fprintf(stderr, "  %s\n", Flags[i].name);
 		
-		fprintf(stderr, "Multiple flags can be separated by ','.\n");
-		fprintf(stderr, "They can be prefixed by '+' or '-' to be mixed.\n");
-		fprintf(stderr, "Giving just 'none' flag disables all of them.\n\n");
+		fprintf(stderr,
+			"Multiple flags can be separated by ','.\n"
+			"Giving just 'none' flag disables all of them.\n\n"
+			"Unless first flag starts with -/+ character, flags from\n"
+			"previous trace command are zeroed.  Prefixing flag with\n"
+			"'-' removes it from set, (optional) '+' adds it to set\n"
+			"(which is useful at run-time in debugger).\n\n"
+		       );
 		return "";
 	}
 	
 	if (strcmp (FlagsStr, "none") == 0)
 	{
+		*Mask = 0;
 		return NULL;
 	}
 	
@@ -336,18 +382,24 @@ Log_ParseOptionFlags (const char *FlagsStr, flagname_t *Flags, int MaxFlags, Uin
 	}
 	
 	cur = FlagsCopy;
+	/* starting anew, not modifiying old set? */
+	if (*cur != '+' && *cur != '-')
+		*Mask = 0;
+
 	while (cur)
 	{
 		sep = strchr(cur, ',');
 		if (sep)			/* end of next options */
 			*sep++ = '\0';
 		
-		Mode = 0;				/* default is 'add' */
+		Mode = FLAG_ADD;
 		if (*cur == '+')
-		{ Mode = 0; cur++; }
+			cur++;
 		else if (*cur == '-')
-		{ Mode = 1; cur++; }
-		
+		{
+			Mode = FLAG_DEL;
+			cur++;
+		}
 		for (i = 0; i < MaxFlags; i++)
 		{
 			if (strcmp(cur, Flags[i].name) == 0)
@@ -356,7 +408,7 @@ Log_ParseOptionFlags (const char *FlagsStr, flagname_t *Flags, int MaxFlags, Uin
 		
 		if (i < MaxFlags)		/* option found */
 		{
-			if (Mode == 0)
+			if (Mode == FLAG_ADD)
 				*Mask |= Flags[i].flag;
 			else
 				*Mask &= (~Flags[i].flag);
@@ -387,9 +439,9 @@ const char* Log_SetExceptionDebugMask (const char *FlagsStr)
 {
 	const char *errstr;
 
-	Uint64 mask = EXCEPT_NONE;
-	errstr = Log_ParseOptionFlags(FlagsStr, ExceptionFlags, ARRAYSIZE(ExceptionFlags), &mask);
-	ConfigureParams.Log.nExceptionDebugMask = mask;
+	Uint64 mask = ConfigureParams.Debugger.nExceptionDebugMask;
+	errstr = Log_ParseOptionFlags(FlagsStr, ExceptionFlags, ARRAY_SIZE(ExceptionFlags), &mask);
+	ConfigureParams.Debugger.nExceptionDebugMask = mask;
 	return errstr;
 }
 
@@ -406,12 +458,14 @@ const char* Log_SetTraceOptions (const char *FlagsStr)
 {
 	const char *errstr;
 
-	LogTraceFlags = TRACE_NONE;
-	errstr = Log_ParseOptionFlags(FlagsStr, TraceFlags, ARRAYSIZE(TraceFlags), &LogTraceFlags);
+	errstr = Log_ParseOptionFlags(FlagsStr, TraceFlags, ARRAY_SIZE(TraceFlags), &LogTraceFlags);
 
 	/* Enable Hatari flags needed for tracing selected items */
 	if (LogTraceFlags & (TRACE_OS_AES|TRACE_OS_VDI))
 		bVdiAesIntercept = true;
+
+	if ((LogTraceFlags & TRACE_OS_BASE) && ConOutDevice == CONOUT_DEVICE_NONE)
+		ConOutDevice = 2;
 
 	return errstr;
 }
@@ -432,7 +486,7 @@ char *Log_MatchTrace(const char *text, int state)
 		i = 0;
 	}
 	/* next match */
-	while (i < ARRAYSIZE(TraceFlags)) {
+	while (i < ARRAY_SIZE(TraceFlags)) {
 		name = TraceFlags[i++].name;
 		if (strncasecmp(name, text, len) == 0)
 			return (strdup(name));

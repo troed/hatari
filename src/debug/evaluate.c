@@ -12,7 +12,7 @@
 
   Originally based on code from my Clac calculator MiNT filter version.
 */
-const char Eval_fileid[] = "Hatari calculate.c : " __DATE__ " " __TIME__;
+const char Eval_fileid[] = "Hatari calculate.c";
 
 #include <ctype.h>
 #include <limits.h>
@@ -21,7 +21,7 @@ const char Eval_fileid[] = "Hatari calculate.c : " __DATE__ " " __TIME__;
 #include <stdlib.h>
 #include <stdbool.h>
 #include <SDL_types.h>
-#include "breakcond.h"
+#include <inttypes.h>
 #include "configuration.h"
 #include "dsp.h"
 #include "debugcpu.h"
@@ -30,6 +30,8 @@ const char Eval_fileid[] = "Hatari calculate.c : " __DATE__ " " __TIME__;
 #include "m68000.h"
 #include "stMemory.h"
 #include "symbols.h"
+#include "vars.h"
+
 
 /* define which character indicates which type of number on expression  */
 #define PREFIX_BIN '%'                            /* binary decimal     */
@@ -58,7 +60,7 @@ const char Eval_fileid[] = "Hatari calculate.c : " __DATE__ " " __TIME__;
 static struct {
 	const char *error;		/* global error code		*/
 	bool valid;			/* value validation		*/
-} id = {0, 0};
+} id = { NULL, 0 };
 
 /* parenthesis and function stacks					*/
 static struct {
@@ -134,7 +136,7 @@ static int getNumber(const char *str, Uint32 *number, int *nbase)
 		fprintf(stderr, "Value missing!\n");
 		return 0;
 	}
-	
+
 	/* determine correct number base */
 	if (str[0] == '0') {
 
@@ -219,7 +221,7 @@ static int getValue(const char *str, Uint32 *number, int *base, bool bForDsp)
 	*base = 0; /* no base (e.g. variable) */
 
 	/* internal Hatari variable? */
-	if (BreakCond_GetHatariVariable(name, number)) {
+	if (Vars_GetVariableValue(name, number)) {
 		return len;
 	}
 
@@ -394,7 +396,7 @@ const char* Eval_Expression(const char *in, Uint32 *out, int *erroff, bool bForD
 	long long value;
 	int dummy, offset = 0;
 	char mark;
-	
+
 	/* Uses global variables:	*/
 
 	par.idx = 0;			/* parenthesis stack pointer	*/
@@ -469,8 +471,8 @@ const char* Eval_Expression(const char *in, Uint32 *out, int *erroff, bool bForD
 	/* until exit or error message					*/
 	} while(mark && !id.error);
 
-        /* result of evaluation 					*/
-        if (val.idx >= 0)
+	/* result of evaluation 					*/
+	if (val.idx >= 0)
 		*out = val.buf[val.idx];
 
 	/* something to return?						*/
@@ -481,9 +483,10 @@ const char* Eval_Expression(const char *in, Uint32 *out, int *erroff, bool bForD
 			operation (value, LOWEST_PREDECENCE);
 			if (par.idx)			/* mismatched	*/
 				id.error = CLAC_PAR_ERR;
+			else if (val.idx < 0)
+				id.error = CLAC_PRG_ERR;
 			else				/* result out	*/
 				*out = val.buf[val.idx];
-
 		} else {
 			if ((val.idx < 0) && (op.idx < 0)) {
 				id.error = CLAC_EXP_ERR;
@@ -511,12 +514,11 @@ static void operation (long long value, char oper)
 	 * operation executed if the next one is on same or lower level
 	 */
 	/* something to calc? */
-	if(id.valid == true) {
-		
+	if (id.valid == true) {
 		/* add new items to stack */
 		PUSH(op, oper);
 		PUSH(val, value);
-		
+
 		/* more than 1 operator  */
 		if(op.idx > par.opx[par.idx]) {
 
@@ -621,19 +623,19 @@ static int get_level (int offset)
 	case '&':
 	case '^':
 		return 0;
-		
+
 	case '>':      /* bit shifting    */
 	case '<':
 		return 1;
-		
+
 	case '+':
 	case '-':
 		return 2;
-		
+
 	case '*':
 	case '/':
 		return 3;
-		
+
 	default:
 		id.error = CLAC_PRG_ERR;
 	}
@@ -650,18 +652,19 @@ static long long apply_op (char opcode, long long value1, long long value2)
 	/* returns the result of operation	*/
 
 	switch (opcode) {
-        case '|':
+	case '|':
 		value1 |= value2;
 		break;
-        case '&':
+	case '&':
 		value1 &= value2;
 		break;
-        case '^':
+	case '^':
 		value1 ^= value2;
 		break;
-        case '>':
+	case '>':
 		value1 >>= value2;
-        case '<':
+		break;
+	case '<':
 		value1 <<= value2;
 		break;
 	case '+':
@@ -680,7 +683,7 @@ static long long apply_op (char opcode, long long value1, long long value2)
 		else
 			id.error = CLAC_DEF_ERR;
 		break;
-        default:
+	default:
 		id.error = CLAC_PRG_ERR;
 	}
 	return value1;				/* return result	*/
@@ -725,7 +728,8 @@ static long long close_bracket (long long value)
 			/* fetch the indirect ST RAM value */
 			addr = val.buf[val.idx];
 			value = STMemory_ReadLong(addr);
-			fprintf(stderr, "  value in RAM at ($%x).l = $%llx\n", addr, value);
+			fprintf(stderr, "  value in RAM at ($%x).l = $%"PRIx64"\n",
+				addr, (uint64_t)value);
 			/* restore state before parenthesis */
 			op.idx = par.opx[par.idx] - 1;
 			val.idx = par.vax[par.idx] - 1;

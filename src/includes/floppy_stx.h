@@ -85,7 +85,8 @@ typedef struct {
 #define	STX_TRACK_FLAG_TRACK_IMAGE_SYNC	(1<<7)			/* bit 7, if set, the track image has a sync position */
 
 
-
+#define	STX_HEADER_ID		"RSY\0"				/* All STX files should start with these 4 bytes */
+#define	STX_HEADER_ID_LEN	4				/* Header ID has 4 bytes */
 
 typedef struct {
 	/* Content of the STX header block (16 bytes) */
@@ -108,7 +109,7 @@ typedef struct {
 #define	STX_MAIN_BLOCK_SIZE		( 4+2+2+2+1+1+4 )	/* Size of the header block in an STX file = 16 bytes */
 
 
-/* Additionnal structures used to save the data for the 'write sector' and 'write track' commands */
+/* Additional structures used to save the data for the 'write sector' and 'write track' commands */
 /* TODO : data are only saved in memory / snapshot and will be lost when exiting. */
 /* We should have a file format to store them with the .STX file */
 typedef struct {
@@ -168,6 +169,7 @@ extern bool	STX_Eject ( int Drive );
 extern STX_MAIN_STRUCT *STX_BuildStruct ( Uint8 *pFileBuffer , int Debug );
 
 
+extern int	FDC_GetBytesPerTrack_STX ( Uint8 Drive , Uint8 Track , Uint8 Side );
 extern Uint32	FDC_GetCyclesPerRev_FdcCycles_STX ( Uint8 Drive , Uint8 Track , Uint8 Side );
 extern int	FDC_NextSectorID_FdcCycles_STX ( Uint8 Drive , Uint8 NumberOfHeads , Uint8 Track , Uint8 Side );
 extern Uint8	FDC_NextSectorID_TR_STX ( void );

@@ -3,77 +3,139 @@
  */
 
 /* fake tracing flags */
+#include <stdio.h>
 #include "log.h"
 Uint64 LogTraceFlags = 0;
+FILE *TraceFile;
 
 /* fake Hatari configuration variables for number parsing */
 #include "configuration.h"
 CNF_PARAMS ConfigureParams;
 
+/* fake hatari-glue.c */
+#include "hatari-glue.h"
+struct uae_prefs currprefs;
+
+/* fake options.c */
+#include "options.h"
+bool Opt_IsAtariProgram(const char *path) { return false; }
+
 /* fake cycles stuff */
 #include "cycles.h"
-int CurrentInstrCycles;
+Uint64	CyclesGlobalClockCounter;
 int Cycles_GetCounter(int nId) { return 0; }
 
-/* fake ST RAM */
+/* bring in gemdos defines (EMULATEDDRIVES) */
+#include "gemdos.h"
+
+/* fake ST RAM, only 24-bit support */
 #include "stMemory.h"
+#if ENABLE_SMALL_MEM
+static Uint8 _STRam[16*1024*1024];
+Uint8 *STRam = _STRam;
+#else
 Uint8 STRam[16*1024*1024];
+#endif
 Uint32 STRamEnd = 4*1024*1024;
-
-/* fake memory banks */
-#include "memory.h"
-addrbank *mem_banks[65536];
-
-/* fake IO memory variables */
-#include "ioMem.h"
-int nIoMemAccessSize;
-Uint32 IoAccessBaseAddress;
+Uint32 STMemory_ReadLong(Uint32 addr) {
+	Uint32 val;
+	if (addr >= STRamEnd) return 0;
+	val = (STRam[addr] << 24) | (STRam[addr+1] << 16) | (STRam[addr+2] << 8) | STRam[addr+3];
+	return val;
+}
+Uint16 STMemory_ReadWord(Uint32 addr) {
+	Uint16 val;
+	if (addr >= STRamEnd) return 0;
+	val = (STRam[addr] << 8) | STRam[addr+1];
+	return val;
+}
+Uint8 STMemory_ReadByte(Uint32 addr) {
+	if (addr >= STRamEnd) return 0;
+	return STRam[addr];
+}
+void STMemory_WriteByte(Uint32 addr, Uint8 val) {
+	if (addr < STRamEnd)
+		STRam[addr] = val;
+}
+void STMemory_WriteWord(Uint32 addr, Uint16 val) {
+	if (addr < STRamEnd) {
+		STRam[addr+0] = val >> 8;
+		STRam[addr+1] = val & 0xff;
+	}
+}
+void STMemory_WriteLong(Uint32 addr, Uint32 val) {
+	if (addr < STRamEnd) {
+		STRam[addr+0] = val >> 24;
+		STRam[addr+1] = val >> 16 & 0xff;
+		STRam[addr+2] = val >> 8 & 0xff;
+		STRam[addr+3] = val & 0xff;
+	}
+}
+bool STMemory_CheckAreaType(Uint32 addr, int size, int mem_type ) {
+	if ((addr > STRamEnd && addr < 0xe00000) ||
+	    (addr >= 0xff0000 && addr < 0xff8000)) {
+		return false;
+	}
+	return true;
+}
 
 /* fake CPU wrapper stuff */
 #include "m68000.h"
-int nWaitStateCycles;
-cpu_instruction_t CpuInstruction;
-void MakeFromSR(void) { }
+Uint16 M68000_GetSR(void) { return 0x2700; }
+void M68000_SetSR(Uint16 v) { }
+void M68000_SetPC(uaecptr v) { }
+void M68000_SetDebugger(bool debug) { }
 
 /* fake UAE core registers */
 #include "newcpu.h"
-cpuop_func *cpufunctbl[65536];
 struct regstruct regs;
-void MakeSR(void) { }
+#if ENABLE_WINUAE_CPU
+void m68k_dumpstate(uaecptr *nextpc, uaecptr prevpc) { }
+void m68k_dumpstate_file (FILE *f, uaecptr *nextpc, uaecptr prevpc) { }
+void m68k_disasm(uaecptr addr, uaecptr *nextpc, uaecptr lastpc, int cnt) { }
+#else
 void m68k_dumpstate (FILE *f, uaecptr *nextpc) { }
 void m68k_disasm (FILE *f, uaecptr addr, uaecptr *nextpc, int cnt) { }
-
-/* fake memory snapshot */
-#include "memorySnapShot.h"
-void MemorySnapShot_Store(void *pData, int Size) { }
-
-/* fake TOS variables */
-#include "tos.h"
-Uint32 TosAddress, TosSize;
+#endif
 
 /* fake debugui.c stuff */
 #include "debug_priv.h"
 #include "debugui.h"
 FILE *debugOutput;
 void DebugUI(debug_reason_t reason) { }
-void DebugUI_PrintCmdHelp(const char *psCmd) { }
-char *DebugUI_MatchHelper(const char **strings, int items, const char *text, int state) {
+int DebugUI_PrintCmdHelp(const char *psCmd) { return DEBUGGER_CMDDONE; }
+int DebugUI_GetPageLines(int config, int defvalue) { return 25; }
+char *DebugUI_MatchHelper(const char **strings, int items, const char *text, int state)
+{
 	return NULL;
 }
+
+/* fake vdi.c stuff */
+#include "vdi.h"
+void VDI_Info(FILE *fp, Uint32 arg) { return; }
 
 /* fake debugInfo.c stuff */
 #include "debugInfo.h"
 void DebugInfo_ShowSessionInfo(void) {}
-Uint32 DebugInfo_GetTEXT(void) { return 0x1234; }
-Uint32 DebugInfo_GetTEXTEnd(void) { return 0x1234; }
-Uint32 DebugInfo_GetDATA(void) { return 0x12f4; }
-Uint32 DebugInfo_GetBSS(void)  { return 0x1f34; }
+Uint32 DebugInfo_GetBASEPAGE(void) { return 0x1f34; }
+Uint32 DebugInfo_GetTEXT(void)     { return 0x1234; }
+Uint32 DebugInfo_GetTEXTEnd(void)  { return 0x1234; }
+Uint32 DebugInfo_GetDATA(void)     { return 0x12f4; }
+Uint32 DebugInfo_GetBSS(void)      { return 0x1f34; }
+info_func_t DebugInfo_GetInfoFunc(const char *name) {
+	if (strcmp(name, "vdi") == 0) {
+		return VDI_Info;
+	}
+	return NULL;
+}
 
 /* fake debugdsp.c stuff */
+#ifdef ENABLE_DSP_EMU
 #include "debugdsp.h"
 void DebugDsp_InitSession(void) { }
 Uint32 DebugDsp_InstrCount(void) { return 0; }
 Uint32 DebugDsp_OpcodeType(void) { return 0; }
+#endif
 
 /* use fake dsp.c stuff in case config.h is configured with DSP emu */
 #include "dsp.h"
@@ -97,10 +159,6 @@ Uint32 DSP_ReadMemory(Uint16 addr, char space, const char **mem_str)
 #include "console.h"
 int ConOutDevice;
 void Console_Check(void) { }
-
-/* fake gemdos stuff */
-#include "gemdos.h"
-const char *GemDOS_GetLastProgramPath(void) { return NULL; }
 
 /* fake profiler stuff */
 #include "profile.h"
@@ -127,7 +185,6 @@ void Video_GetPosition(int *pFrameCycles, int *pHBL, int *pLineCycles)
 
 /* only function needed from file.c */
 #include <sys/stat.h>
-#include <sys/time.h>
 #include "file.h"
 bool File_Exists(const char *filename)
 {

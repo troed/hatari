@@ -10,6 +10,14 @@
 #ifndef BLITTER_H
 #define BLITTER_H
 
+
+extern Uint16	BlitterPhase;
+
+extern void Blitter_Reset ( void );
+
+extern void	Blitter_StatsUpdateRate ( int period_cycles );
+extern int	Blitter_StatsGetRate ( void );
+
 extern void Blitter_Halftone00_ReadWord(void);
 extern void Blitter_Halftone01_ReadWord(void);
 extern void Blitter_Halftone02_ReadWord(void);
@@ -76,6 +84,12 @@ extern void Blitter_Skew_WriteByte(void);
 
 extern void Blitter_MemorySnapShot_Capture(bool bSave);
 extern void Blitter_InterruptHandler(void);
-extern void Blitter_Info(Uint32 arg);
+extern void Blitter_Info(FILE *fp, Uint32 arg);
+
+extern void Blitter_HOG_CPU_mem_access_before ( int bus_count );
+extern void Blitter_HOG_CPU_mem_access_after ( int bus_count );
+extern int  Blitter_Check_Simultaneous_CPU ( void );
+extern void Blitter_HOG_CPU_do_cycles_after ( int cycles );
+
 
 #endif /* BLITTER_H */

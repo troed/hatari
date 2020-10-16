@@ -10,20 +10,80 @@
  */
 #ifdef __PUREC__	/* or AHCC */
 # include <tos.h>
+# include <mint/sysvars.h>
 #else
 # include <osbind.h>
 #endif
+#include <unistd.h>
 #include <stdio.h>
 #include "common.h"
 
 /*------- success / failure ----- */
 
 /* anything failing changes 'msg' to failure,
- * write_midi() expects them to be of same lenght.
+ * write_midi() expects them to be of same length.
  */
 static const char success[] = SUCCESS;
 static const char failure[] = FAILURE;
 static const char *msg = success;
+
+
+/* ------- sleeper functions ------ */
+
+#define ETOS_STR 0x45544F53  /* "ETOS" */
+
+/* how long sleep is needed to make sure all TOS
+ * versions have started timer/counter after boot
+ * so that printing will work?
+ *
+ * 2s is enough with floppies as they're slower,
+ * but GEMDOS HD needs 4s with TOS v1.x
+ */
+static int sleep_secs = 4;
+
+/* return NULL if OS version needs a sleep, otherwise a version info string */
+static long can_skip_sleep(void)
+{
+	char *msg;
+	long sysbase;
+	OSHEADER* osheader;
+
+	sysbase = *_sysbase;
+	osheader = (OSHEADER*)sysbase;
+
+	/* no extra boot sleeps needed with EmuTOS... */
+	if ((long)(osheader->p_rsv2) == ETOS_STR) {
+		msg = "EmuTOS";
+		return (long)msg;
+	}
+	/* ...or newer (= slower to boot?) Atari TOS versions */
+	if (osheader->os_version >= 0x0300) {
+		msg = "TOS >= v3";
+		return (long)msg;
+	}
+	return NULL;
+}
+
+/* do the sleeping */
+static void sleep_if_needed(void)
+{
+	char *info;
+
+	/* already slept? */
+	if (!sleep_secs) {
+		return;
+	}
+
+	info = (char *)Supexec(can_skip_sleep);
+	if (info) {
+		printf("\r\n%s -> no extra sleeps needed\r\n", info);
+	} else {
+		printf("\r\nSleeping %d secs...\r\n(for TOS printing to work after boot)\r\n",
+		       sleep_secs);
+		sleep(sleep_secs);
+	}
+	sleep_secs = 0;
+}
 
 /* ------- helper functions ------ */
 
@@ -50,9 +110,6 @@ static void close_device(long handle)
 
 static void print_ioerror(const char *op, int handle, int bufsize, char *buffer, long count)
 {
-	if (!count) {
-		return;
-	}
 	printf("ERROR: %s(%d, %d, %p) -> %ld\r\n", op, handle, bufsize, buffer, count);
 	msg = failure;
 }
@@ -75,12 +132,15 @@ static void write_gemdos_device(const char *from, const char *to)
 	while (1) {
 		/* copy file contents */
 		count1 = Fread(handle1, sizeof(buffer), buffer);
-		if (count1 <= 0 || count1 > (long)sizeof(buffer)) {
+		if (!count1) {
+			break;
+		}
+		if (count1 < 0 || count1 > (long)sizeof(buffer)) {
 			print_ioerror("Fread", handle1, sizeof(buffer), buffer, count1);
 			break;
 		}
 		count2 = Fwrite(handle2, count1, buffer);
-		if (count2 <= 0) {
+		if (count2 != count1) {
 			print_ioerror("Fwrite", handle2, count1, buffer, count2);
 			break;
 		}
@@ -117,6 +177,7 @@ void write2console(const char *input)
 
 void write2printer(const char *input)
 {
+	sleep_if_needed();
 	printf("\r\n%s -> PRN: (printer)\r\n", input);
         if (Cprnos()) {
 		write_gemdos_device(input, "PRN:");

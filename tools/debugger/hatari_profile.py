@@ -2,10 +2,11 @@
 #
 # Hatari profile data processor
 #
-# 2013 (C) Eero Tamminen, licensed under GPL v2+
+# 2013-2019 (C) Eero Tamminen, licensed under GPL v2+
 #
 """
-A tool for post-processing emulator HW profiling data.
+A tool for post-processing Hatari emulator HW profiling data with
+symbol information.
 
 In Hatari debugger you get (CPU) profiling data with the following
 commands (for Falcon DSP data, prefix commands with 'dsp'):
@@ -16,9 +17,10 @@ commands (for Falcon DSP data, prefix commands with 'dsp'):
 
 Profiling information for code addresses is summed together and
 assigned to (function) symbols to which those addresses belong to.
-All addresses between two symbol names (in profile file) or symbol
-addresses (read from symbols files) are assumed to belong to the
-preceeding function/symbol.
+
+All costs for addresses between two symbol names (in profile file) or
+symbol addresses (read from symbols files) are assumed to belong to
+the function/symbol which address precedes them.
 
 Tool output will contain at least:
 - (deduced) call counts,
@@ -28,10 +30,10 @@ Tool output will contain at least:
 If profile data contains other information (e.g. cache misses),
 that is also shown.
 
-Provided symbol information should be in same format as for Hatari
-debugger 'symbols' command.  Note that files containing absolute
-addresses and ones containing relatives addresses need to be given
-with different options!
+Provided symbol information should be in the same format as for
+the Hatari debugger 'symbols' command.  Note that files containing
+absolute addresses and ones containing relatives addresses need to
+be given with different options!
 
 
 Usage: hatari-profile [options] <profile files>
@@ -68,30 +70,34 @@ Long options for above are:
 (Timing --info is shown only for cycles list.)
 
 For example:
-	hatari-profile -a etos512k.sym -st -g -f 10 prof1.txt prof2.txt
+	hatari-profile -a etos512k.sym -st -f 10 prof1.txt prof2.txt
 
 For each given profile file, output is:
 - profile statistics
 - a sorted list of functions, for each of the profile data items
   (calls, instructions, cycles...)
-- callgraph in DOT format for each of the profile data items, for
-  each of the profile files, saved to <filename>-<itemindex>.dot file
-  (prof1-0.dot, prof1-2.dot etc)
 
 
 When both -l and -f options are specified, they're combined.  Produced
-lists contain at least the number of items specified for -f option,
-and more if there are additional items which percentage of the total
-value is larger than one given for -l option.  In callgraphs these
-options mainly affect which nodes are highlighted.
+lists contain at least the number of items specified for the -f option,
+and more, if there are additional items which percentage of the total
+value is larger than the one given for the -l option.  In callgraphs
+these options mainly affect which nodes are highlighted.
 
 
-If profile includes "caller" information, -p option can be used to see:
-- costs also for everything else that a subroutine calls,
-- subroutine's "own" cost, which exclude costs for any further
-  subroutine calls that it does.
+If profiling was done after loading symbol information for the profile code,
+profile ddata includes "caller" information.  Then -p option can be used
+to see:
+- costs also for everything else that a subroutine calls, in addition to
+- subroutine's "own" cost, which excludes costs for any further subroutine
+  calls that it did
+
 (For more information on how these differ from normally shown costs,
 see Profiling section in Hatari manual.)
+
+With the -g option, callgraph are generated in DOT format for each of
+the profile data items, for each of the profile files, saved to
+<filename>-<itemindex>.dot file (prof1-0.dot, prof1-2.dot etc).
 
 Nodes with subroutine costs are shown as diamonds in the callgraphs.
 
@@ -99,15 +105,15 @@ Nodes with subroutine costs are shown as diamonds in the callgraphs.
 Call information filtering options:
         --no-calls <[bersux]+>	remove calls of given types, default = 'rux'
 	--ignore-to <list>	ignore calls to these symbols
-	--compact		leave only single connection for symbols
-        			that are directly connected
+	--compact		leave only single connection between symbols
+        			which are connected through single node path
 
-(Give --no-calls option an unknown type to see type descriptions.)
+(Give --no-calls option other char than [bersux] to see type descriptions.)
 
 <list> is a comma separate list of symbol names, like this:
 	--ignore-to _int_timerc,_int_vbl
 
-These options change which calls are reported for functions and can
+These options change which calls are reported for functions, and can
 affect the shape & complexity of the graph a lot.  If you e.g. want
 to see just nodes with costs specific to -p option, use "--no-calls
 berux" option.
@@ -117,8 +123,9 @@ handling switches [1], give handler names to --ignore-to option.
 In callgraphs, one can then investigate them separately using
 "no-calls '' --only <name>" options.
 
-[1] Switching to interrupt handler gets recorded as "a call" to it
-    by the profiler, and such "calls" can happen at any time.
+[1] CPU being interrupted by an interrupt handler gets recorded as
+    "a call" to that handler by the profiler, and because such "calls"
+    can happen at any time, then can mess graphs badly
 
 NOTE: costs shown with -p option include costs of exception handling
 code that interrupts the function calls.  Normally effect of this
@@ -143,7 +150,7 @@ own costs fall below limit given with the -l option.  Remember to
 give -l option with them as -l defaults to 0.0 on callgraphs!
 
 Functions which are called from everywhere (like malloc), may be good
-candinates for '--ignore' option when one wants a more readable graph.
+candidates for '--ignore' option when one wants a more readable graph.
 One can then investigate them separately with the '--only <function>'
 option.
 
@@ -153,8 +160,8 @@ if intermediate nodes have been removed with above options.
 
 
 Callgraph visualization options:
-	--mark <list>	  	  mark nodes which names contain any
-        			  of the listed string(s)
+	--mark <list>	  	  color nodes which names contain any
+        			  of the listed string(s) differently
         -e, --emph-limit <limit>  percentage limit for highlighted nodes
 
 When -e limit is given, it is used for deciding which nodes to
@@ -175,11 +182,11 @@ from bisect import bisect_right
 import getopt, os, re, sys
 
 # PC address that was undefined during profiling,
-# signifies first called symbol in data
+# signifies normally first called symbol in data
 PC_UNDEFINED = 0xffffff
 
 # call type identifiers and their information
-CALL_STARTUP = '0'	# first called symbol, special calse
+CALL_STARTUP = '0'	# first called symbol, special case
 CALL_SUBROUTINE = 's'
 CALL_SUBRETURN = 'r'
 CALL_EXCEPTION = 'e'
@@ -188,7 +195,7 @@ CALL_BRANCH = 'b'
 CALL_NEXT = 'n'
 CALL_UNKNOWN = 'u'
 CALLTYPES = {
-    CALL_SUBROUTINE: "subroutine call",		# is calls
+    CALL_SUBROUTINE: "subroutine call",		# is call
     CALL_SUBRETURN:  "subroutine return",	# shouldn't be call
     CALL_EXCEPTION:  "exception",		# is call
     CALL_EXCRETURN:  "exception return",	# shouldn't be call
@@ -222,7 +229,7 @@ class Output:
         try:
             self.set_output(open(fname, "w"))
             return fname
-        except IOError, err:
+        except IOError as err:
             self.warning(err)
         return None
 
@@ -315,7 +322,7 @@ class FunctionStats:
 # ---------------------------------------------------------------------
 class InstructionStats:
     "statistics on all instructions"
-    # not changable, these are expectatations about the data fields
+    # not changeable, these are expectatations about the data fields
     # in this, FunctionStats, ProfileCallers and ProfileGraph classes
     callcount_field = 0
     instructions_field = 1
@@ -390,6 +397,8 @@ class ProfileSymbols(Output):
         self.symbols = None	# (addr:symbol) dict for resolving
         self.absolute = {}	# (addr:symbol) dict of absolute symbols
         self.relative = {}	# (addr:symbol) dict of relative symbols
+        self.aliases = {}       # (name:addr) dict of replaced absolute symbols
+        self.rel_aliases = {}   # (name:addr) dict of replaced relative symbols
         self.symbols_need_sort = False
         self.symbols_sorted = None	# sorted list of symbol addresses
         # Non-overlapping memory areas that may be specified in profile file
@@ -400,11 +409,11 @@ class ProfileSymbols(Output):
         # TOS:	0xe00000-0xe80000
         self.r_area = re.compile("^([^:]+):[^0]*0x([0-9a-f]+)-0x([0-9a-f]+)$")
         # symbol file format:
-        # [0x]<hex> [tTbBdD] <symbol/objectfile name>
-        self.r_symbol = re.compile("^(0x)?([a-fA-F0-9]+) ([bBdDtT]) ([$]?[-_.a-zA-Z0-9]+)$")
+        # [0x]<hex> [<type>] <symbol/objectfile name>
+        self.r_symbol = re.compile("^(0x)?([a-fA-F0-9]+) ([aAbBdDrRtTvVwW]) ([$]?[-_.a-zA-Z0-9]+)$")
 
     def parse_areas(self, fobj, parsed):
-        "parse memory area lines from data"
+        "parse memory area lines from data and post-process earlier read symbols data"
         while True:
             parsed += 1
             line = fobj.readline()
@@ -423,7 +432,8 @@ class ProfileSymbols(Output):
                 self.error_exit("invalid memory area '%s': 0x%x-0x%x on line %d" % (name, start, end, parsed))
             elif self.verbose:
                 self.message("memory area '%s': 0x%x-0x%x" % (name, start, end))
-        self._relocate_symbols()
+        self._combine_symbols()
+        self._clean_aliases()
         return line, parsed-1
 
     def get_area(self, addr):
@@ -433,18 +443,20 @@ class ProfileSymbols(Output):
                 return (key, addr - value[0])
         return (self.default_area, addr)
 
-    def _check_symbol(self, addr, name, symbols):
+    def _check_symbol(self, addr, name, symbols, aliases):
         "return True if symbol is OK for addition"
+        # same address has already a symbol?
         if addr in symbols:
-            # symbol exists already for that address
+            # with same name?
             if name == symbols[addr]:
                 return False
             # prefer function names over object names
             if name.endswith('.o'):
+                aliases[name] = addr
                 return False
             oldname = symbols[addr]
             lendiff = abs(len(name) - len(oldname))
-            minlen = min(len(name), min(oldname))
+            minlen = min(len(name), len(oldname))
             # don't warn about object name replacements,
             # or adding/removing short prefix or postfix
             if not (oldname.endswith('.o') or
@@ -452,15 +464,33 @@ class ProfileSymbols(Output):
                      (name.endswith(oldname) or oldname.endswith(name) or
                      name.startswith(oldname) or oldname.startswith(name)))):
                 self.warning("replacing '%s' at 0x%x with '%s'" % (oldname, addr, name))
+            # add also previous name as alias for new name
+            aliases[symbols[addr]] = addr
         return True
+
+    def _clean_aliases(self):
+        "remove address aliases for names that already have symbols"
+        to_remove = {}
+        for name, addr in self.aliases.items():
+            if name in self.names:
+                if addr == self.names[name]:
+                    to_remove[name] = True
+                    continue
+                self.warning("multiple addresses (0x%x & 0x%x) for symbol '%s'" % (addr, self.names[name], name))
+                if addr in self.symbols:
+                    self.warning("- 0x%x is also address for symbol '%s'" % (addr, self.symbols[addr]))
+        for name in to_remove.keys():
+            del(self.aliases[name])
 
     def parse_symbols(self, fobj, is_relative):
         "parse symbol file contents"
         unknown = lines = 0
         if is_relative:
             symbols = self.relative
+            aliases = self.rel_aliases
         else:
             symbols = self.absolute
+            aliases = self.aliases
         for line in fobj.readlines():
             lines += 1
             line = line.strip()
@@ -471,7 +501,7 @@ class ProfileSymbols(Output):
                 dummy, addr, kind, name = match.groups()
                 if kind in ('t', 'T'):
                     addr = int(addr, 16)
-                    if self._check_symbol(addr, name, symbols):
+                    if self._check_symbol(addr, name, symbols, aliases):
                         symbols[addr] = name
             else:
                 self.warning("unrecognized symbol line %d:\n\t'%s'" % (lines, line))
@@ -496,7 +526,7 @@ class ProfileSymbols(Output):
         self.names[name] = addr
         return name
 
-    def _relocate_symbols(self):
+    def _combine_symbols(self):
         "combine absolute and relative symbols to single lookup"
         # renaming is done only at this point (after parsing memory areas)
         # to avoid addresses in names dict to be messed by relative symbols
@@ -512,21 +542,32 @@ class ProfileSymbols(Output):
             return
         if self.text_area not in self.areas:
             self.error_exit("'%s' area range missing from profile, needed for relative symbols" % self.text_area)
+
         area = self.areas[self.text_area]
+        # relocate symbols used for resolving
         for addr, name in self.relative.items():
             addr += area[0]
             # -1 used because compiler can add TEXT symbol right after end of TEXT section
             if addr < area[0] or addr-1 > area[1]:
                 self.error_exit("relative symbol '%s' address 0x%x is outside of TEXT area: 0x%x-0x%x!\nDo symbols match the profiled binary?" % (name, addr, area[0], area[1]))
-            if self._check_symbol(addr, name, self.symbols):
+            if self._check_symbol(addr, name, self.symbols, self.rel_aliases):
                 name = self._rename_symbol(addr, name)
                 self.symbols[addr] = name
                 if self.verbose:
                     self.message("0x%x: %s (relative)" % (addr, name))
+        # relocate relative address aliases
+        for addr, name in self.rel_aliases.items():
+            addr += area[0]
+            # -1 used because compiler can add TEXT symbol right after end of TEXT section
+            if addr < area[0] or addr-1 > area[1]:
+                self.error_exit("relative symbol '%s' address 0x%x is outside of TEXT area: 0x%x-0x%x!\nDo symbols match the profiled binary?" % (name, addr, area[0], area[1]))
+            if name in self.aliases and self.aliases[name] != addr:
+                self.warning("conflicting addresses 0x%x & 0x%x for symbol '%s'" % (addr, self.aliases[name], name))
+            self.aliases[name] = addr
 
     def add_profile_symbol(self, addr, name):
         "add absolute symbol and return its name in case it got renamed"
-        if self._check_symbol(addr, name, self.symbols):
+        if self._check_symbol(addr, name, self.symbols, self.aliases):
             name = self._rename_symbol(addr, name)
             self.symbols[addr] = name
             self.symbols_need_sort = True
@@ -546,12 +587,18 @@ class ProfileSymbols(Output):
             return self.areas[name][0]
         return None
 
+    def get_alias_addr(self, name):
+        "return symbol address for given address alias, or None (for Callgrind)"
+        if name in self.aliases:
+            return self.aliases[name]
+        return None
+
     def get_preceeding_symbol(self, addr):
-        "resolve non-function addresses to preceeding function name+offset"
+        "resolve non-function addresses to preceding function name+offset"
         # should be called only after profile addresses has started
         if self.symbols:
             if self.symbols_need_sort:
-                self.symbols_sorted = self.symbols.keys()
+                self.symbols_sorted = list(self.symbols.keys())
                 self.symbols_sorted.sort()
                 self.symbols_need_sort = False
             idx = bisect_right(self.symbols_sorted, addr) - 1
@@ -854,6 +901,9 @@ class ProfileCallgrind(Output):
                 continue
             name = line.strip().split('=')[1]
             paddr = symbols.get_addr(name)
+            if not paddr:
+                self.warning("no resolved address for symbol '%s', trying address aliases instead" % name)
+                paddr = symbols.get_alias_addr(name)
             if profile[paddr].child:
                 self._output_calls(profile, paddr)
             items += 1
@@ -1004,7 +1054,7 @@ class EmulatorProfile(Output):
             # continuation may skip to a function which name is not visible in profile file
             name, offset = self.symbols.get_preceeding_symbol(addr)
             symaddr = addr - offset
-            # if changed area, preceeding symbol can be before area start,
+            # if changed area, preceding symbol can be before area start,
             # so need to check both address, and name having changed
             if symaddr > function.addr and name != function.name:
                 addr = symaddr
@@ -1024,7 +1074,7 @@ class EmulatorProfile(Output):
         "parse profile disassembly"
         prev_addr = 0
         discontinued = False
-        function = FunctionStats(None, 0, 0, self.stats.items)
+        function = FunctionStats(None, -1, 0, self.stats.items)
         while True:
             if not line:
                 break
@@ -1101,20 +1151,19 @@ class ProfileSorter:
         self.field = None
         self.show_subcosts = subcosts
 
-    def _cmp_field(self, i, j):
-        "compare currently selected field in profile data"
-        field = self.field
-        return cmp(self.profile[i].cost[field], self.profile[j].cost[field])
+    def _cmp_field(self, i):
+        "return currently selected field in profile data"
+        return self.profile[i].cost[self.field]
 
     def get_combined_limit(self, field, count, limit):
         "return percentage for given profile field that satisfies both count & limit constraint"
         if not count:
             return limit
-        keys = self.profile.keys()
+        keys = list(self.profile.keys())
         if len(keys) <= count:
             return 0.0
         self.field = field
-        keys.sort(self._cmp_field, None, True)
+        keys.sort(key=self._cmp_field, reverse=True)
         total = self.stats.totals[field]
         function = self.profile[keys[count]]
         if self.show_subcosts and function.subtotal:
@@ -1209,8 +1258,8 @@ class ProfileSorter:
         if self.stats.totals[field] == 0:
             return
         self.field = field
-        keys = self.profile.keys()
-        keys.sort(self._cmp_field, None, True)
+        keys = list(self.profile.keys())
+        keys.sort(key=self._cmp_field, reverse=True)
         self._output_list(keys, count, limit, show_info)
 
 
@@ -1462,10 +1511,10 @@ label="%s";
                         to_remove[addr] = True
                         continue
                     # refers just to itself?
-                    if children == 1 and addr == function.child.keys()[0]:
+                    if children == 1 and addr == tuple(function.child.keys())[0]:
                         to_remove[addr] = True
                         continue
-                    if parents == 1 and addr == function.parent.keys()[0]:
+                    if parents == 1 and addr == tuple(function.parent.keys())[0]:
                         to_remove[addr] = True
                         continue
                 if self.remove_intermediate:
@@ -1601,6 +1650,8 @@ label="%s";
     def do_output(self, profobj, fname):
         "output graphs for given profile data"
         if not (self.output_enabled and profobj.callers.present):
+            if not profobj.callers.present:
+                self.warning("callgraph output enabled, but caller info is missing!")
             return
         stats = profobj.stats
         for field in range(profobj.stats.items):
@@ -1707,7 +1758,7 @@ class Main(Output):
             elif opt == "--ignore-to":
                 prof.set_ignore_to(arg.split(','))
             # options for profile Callgraph info generation
-            elif opt in ("-k", "--calgrind"):
+            elif opt in ("-k", "--callgrind"):
                 prof.enable_callgrind()
             # options for both graphs & statistics
             elif opt in ("-f", "--first"):
@@ -1773,7 +1824,7 @@ class Main(Output):
         "open given path in given mode & return file object"
         try:
             return open(path, mode)
-        except IOError, err:
+        except IOError as err:
             self.usage("opening given '%s' file in mode '%s' failed:\n\t%s" % (path, mode, err))
 
     def get_value(self, opt, arg, tofloat):
@@ -1789,8 +1840,7 @@ class Main(Output):
     def usage(self, msg):
         "show program usage + error message"
         self.message(__doc__)
-        self.message("ERROR: %s!" % msg)
-        sys.exit(1)
+        self.error_exit(msg)
 
 
 # ---------------------------------------------------------------------

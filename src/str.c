@@ -6,7 +6,7 @@
 
   String functions.
 */
-const char Str_fileid[] = "Hatari str.c : " __DATE__ " " __TIME__;
+const char Str_fileid[] = "Hatari str.c";
 
 #include <stdio.h>
 #include <ctype.h>
@@ -16,6 +16,9 @@ const char Str_fileid[] = "Hatari str.c : " __DATE__ " " __TIME__;
 #include <SDL_types.h>
 #include "configuration.h"
 #include "str.h"
+
+/* Used only by Str_Filename2TOSname() */
+static void Str_HostToAtari(const char *source, char *dest, char replacementChar);
 
 
 /**
@@ -85,10 +88,54 @@ char *Str_ToLower(char *pString)
 	return pString;
 }
 
+/**
+ * Allocate memory for a string and check for out-of memory (and exit the
+ * program in that case, since there is likely nothing we can do if we even
+ * can not allocate small strings anymore).
+ *
+ * @len  Length of the string (without the trailing NUL character)
+ */
+char *Str_Alloc(int len)
+{
+	char *newstr = malloc(len + 1);
+
+	if (!newstr)
+	{
+		perror("string allocation failed");
+		exit(1);
+	}
+
+	newstr[0] = newstr[len] = 0;
+
+	return newstr;
+}
+
+/**
+ * This function is like strdup, but also checks for out-of memory and exits
+ * the program in that case (there is likely nothing we can do if we even can
+ * not allocate small strings anymore).
+ */
+char *Str_Dup(const char *str)
+{
+	char *newstr;
+
+	if (!str)
+		return NULL;
+
+	newstr = strdup(str);
+	if (!newstr)
+	{
+		perror("string duplication failed");
+		exit(1);
+	}
+
+	return newstr;
+}
 
 /**
  * truncate string at first unprintable char (e.g. newline).
  */
+#if 0
 char *Str_Trunc(char *pString)
 {
 	int i = 0;
@@ -104,11 +151,12 @@ char *Str_Trunc(char *pString)
 	}
 	return pString;
 }
-
+#endif
 
 /**
  * check if string is valid hex number.
  */
+#if 0
 bool Str_IsHex(const char *str)
 {
 	int i = 0;
@@ -120,7 +168,7 @@ bool Str_IsHex(const char *str)
 	}
 	return true;
 }
-
+#endif
 
 /**
  * Convert potentially too long host filenames to 8.3 TOS filenames
@@ -391,6 +439,13 @@ static void Str_LocalToAtari(const char *source, char *dest, char replacementCha
 
 void Str_AtariToHost(const char *source, char *dest, int destLen, char replacementChar)
 {
+	if (!ConfigureParams.HardDisk.bFilenameConversion)
+	{
+		strncpy(dest, source, destLen);
+		if (destLen > 0)
+			dest[destLen-1]= '\0';
+		return;
+	}
 #if defined(WIN32) || defined(USE_LOCALE_CHARSET)
 	Str_AtariToLocal(source, dest, destLen, replacementChar);
 #else
@@ -398,8 +453,13 @@ void Str_AtariToHost(const char *source, char *dest, int destLen, char replaceme
 #endif
 }
 
-void Str_HostToAtari(const char *source, char *dest, char replacementChar)
+static void Str_HostToAtari(const char *source, char *dest, char replacementChar)
 {
+	if (!ConfigureParams.HardDisk.bFilenameConversion)
+	{
+		strcpy(dest, source);
+		return;
+	}
 #if defined(WIN32) || defined(USE_LOCALE_CHARSET)
 	Str_LocalToAtari(source, dest, replacementChar);
 #else
@@ -555,6 +615,3 @@ void	Str_Dump_Hex_Ascii ( char *p , int Len , int Width , const char *Suffix , F
 		
 	}
 }
-
-
-

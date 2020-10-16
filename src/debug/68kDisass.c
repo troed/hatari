@@ -5,16 +5,19 @@
  *	or at your option any later version. Read the file gpl.txt for details.
  ***/
 
-#include <stdio.h>
-#include <ctype.h>
-#include <strings.h>
-#include <stdlib.h>
-
-#include "config.h"
-#include "sysdeps.h"
 #include "main.h"
+#include <ctype.h>
+#if HAVE_STRINGS_H
+# include <strings.h>
+#endif
+
+#include "sysdeps.h"
 #include "configuration.h"
 #include "newcpu.h"
+#include "stMemory.h"
+#ifdef WINUAE_FOR_HATARI
+#include "debug.h"
+#endif
 #include "paths.h"
 #include "profile.h"
 #include "tos.h"
@@ -37,7 +40,7 @@ static const Diss68kOptions optionsMask = doptOpcodesSmall | doptRegisterSmall |
 
 // values <0 will hide the group
 static int			optionPosAddress = 0;	// current address
-static int			optionPosHexdump = 10;	// 16-bit words at this address
+static int			optionPosHexdump = 12;	// 16-bit words at this address
 static int			optionPosLabel = 35;	// label, if defined
 static int			optionPosOpcode = 47;	// opcode
 static int			optionPosOperand = 57;	// operands for the opcode
@@ -127,7 +130,7 @@ static inline unsigned short	Disass68kGetWord(long addr)
 	if ( ! valid_address ( addr , 2 ) )
 		return 0;
 
-	return get_word(addr);
+	return STMemory_ReadWord ( addr );
 }
 
 // Load a text file into memory, count the lines and replace the LF with 0-bytes.
@@ -135,28 +138,31 @@ static int			Disass68kLoadTextFile(const char *filename, char **filebuf)
 {
 	long	index;
 	long	fileLength;
-	int	lineCount;
+	int	lineCount = 0;
 	char	*fbuf;
 	FILE	*f;
 	
 	if(filebuf)
 		*filebuf = NULL;
 	f = fopen(filename, "r");
-	if(!f) return 0;
-	if(fseek(f, 0, SEEK_END))
+	if (!f)
 		return 0;
+	if (fseek(f, 0, SEEK_END))
+		goto out;
 	fileLength = ftell(f);
-	if(fileLength <= 0) return 0;
-	if(fseek(f, 0, SEEK_SET))
-		return 0;
+	if (fileLength <= 0)
+		goto out;
+	if (fseek(f, 0, SEEK_SET))
+		goto out;
 	fbuf = malloc(fileLength);
-	if(!fbuf) return 0;
+	if(!fbuf)
+		goto out;
 	if((size_t)fileLength != fread(fbuf, sizeof(char), fileLength, f))
 	{
 		free(fbuf);
-		return 0;
+		goto out;
 	}
-	lineCount = 0;
+
 	for(index=0; index<fileLength; ++index)
 	{
 		if(fbuf[index] == '\r')	// convert potential CR into a space (which we ignore at the end of the line anyway)
@@ -169,6 +175,8 @@ static int			Disass68kLoadTextFile(const char *filename, char **filebuf)
 	}
 	if(filebuf)
 		*filebuf = fbuf;
+out:
+	fclose(f);
 	return lineCount;
 }
 
@@ -183,9 +191,17 @@ static void			Disass68kLoadStructInfo(const char *filename)
 
 	if(!lineCount) return;
 
-	disStructEntries = realloc(disStructEntries, sizeof(disStructEntry)
-	                           * (disStructCounts + lineCount));
-	if(!disStructEntries) { free(fbuf); return; }
+	se = realloc(disStructEntries, sizeof(disStructEntry) * (disStructCounts + lineCount));
+	if (!se)
+	{
+		perror("Disass68kLoadStructInfo");
+		free(disStructEntries);
+		disStructEntries = NULL;
+		free(fbuf);
+		return;
+	}
+	disStructEntries = se;
+	se = NULL;
 
 	line = fbuf;
 
@@ -257,10 +273,23 @@ static void			Disass68kLoadSymbols(const char *filename)
 	char	*nextLine;
 	char	*line;
 	char	*fbuf = NULL;
-	int		lineCount = Disass68kLoadTextFile(filename, &fbuf);
-	if(!lineCount) return;
-	disSymbolEntries = realloc(disSymbolEntries, sizeof(disSymbolEntry) * (disSymbolCounts + lineCount));
-	if(!disSymbolEntries) { free(fbuf); return; }
+	int	lineCount = Disass68kLoadTextFile(filename, &fbuf);
+	disSymbolEntry *nde;
+
+	if (!lineCount)
+		return;
+
+	nde = realloc(disSymbolEntries, sizeof(disSymbolEntry) * (disSymbolCounts + lineCount));
+	if (!nde)
+	{
+		perror("Disass68kLoadSymbols");
+		free(disSymbolEntries);
+		disSymbolEntries = NULL;
+		free(fbuf);
+		return;
+	}
+	disSymbolEntries = nde;
+
 	line = fbuf;
 
 	for(i=0; i<lineCount; line = nextLine, ++i)
@@ -457,23 +486,29 @@ static const char	*Disass68kSymbolName(long addr, int size)
 static const char	*Disass68kRegname(int reg)
 {
 	static char		regName[3];
-	switch(reg)
-	{
-	case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07:
-		sprintf(regName, "%c%d", (options & doptRegisterSmall ? 'd' : 'D'), reg);
-		break;
 
-	case 0x0F:
-		if(options & doptStackSP)	// display A7 as SP
-		{
-			if(options & doptRegisterSmall)
-				return "sp";
-			return "SP";
-		}
-	case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E:
-		sprintf(regName, "%c%d", (options & doptRegisterSmall ? 'a' : 'A'), reg & 7);
-		break;
+	if (reg == 0x0F && (options & doptStackSP) != 0)
+	{
+		/* display A7 as SP */
+		return (options & doptRegisterSmall) ? "sp" : "SP";
 	}
+
+	if (reg >= 0x0 && reg <= 0x7)
+	{
+		regName[0] = (options & doptRegisterSmall) ? 'd' : 'D';
+	}
+	else if (reg >= 0x8 && reg <= 0xf)
+	{
+		regName[0] = (options & doptRegisterSmall) ? 'a' : 'A';
+	}
+	else
+	{
+		regName[0] = '?';
+	}
+
+	regName[1] = '0' + (reg & 7);
+	regName[2] = 0;
+
 	return regName;
 }
 
@@ -817,6 +852,7 @@ static char		*Disass68kEA(char *disassbuf, char *commentBuffer, long *addr, long
 			case 3: 
 				bd = Disass68kGetWord(*addr); *addr += 2;
 				bd <<= 16;
+				/* fall through */
 			case 2:
 				bd |= Disass68kGetWord(*addr); *addr += 2;
 				break;
@@ -887,6 +923,7 @@ static char		*Disass68kEA(char *disassbuf, char *commentBuffer, long *addr, long
 			case 3:
 				od = Disass68kGetWord(*addr); *addr += 2;
 				od <<= 16;
+				/* fall through */
 			case 2:
 				od |= Disass68kGetWord(*addr); *addr += 2;
 				if(prefixComma)
@@ -1005,6 +1042,7 @@ static char		*Disass68kEA(char *disassbuf, char *commentBuffer, long *addr, long
 		switch(size)
 		{
 		case 1: eWord1 &= 0xFF;
+			/* fall through */
 		case 2:
 #if USE_SYMBOLS
 				if(disassFlag)
@@ -1302,7 +1340,7 @@ typedef const struct {
 	int				disassFlag;
 } OpcodeTableStruct;
 
-static const OpcodeTableStruct	OpcodeTable[] = {
+static OpcodeTableStruct	OpcodeTable[] = {
 	{ MC_ALL, {0xff00, 0x0000}, {-1,6,2,0}, {ofI,ofEa}, "ORI.?",{0,EA_Immed|EA_PCRel|EA_An}},
 	{ MC_ALL, {0xf1c0, 0x0100}, {4}, {ofDestDn,ofEa}, "BTST",{0,EA_An|EA_Immed} },
 	{ MC_ALL, {0xf1c0, 0x0140}, {4}, {ofDestDn,ofEa}, "BCHG",{0,EA_Immed|EA_PCRel|EA_An}},
@@ -1517,26 +1555,26 @@ static const OpcodeTableStruct	OpcodeTable[] = {
 
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0800}, {0}, {ofEa,ofSpecReg}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT0} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0900}, {0}, {ofEa,ofSpecReg}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT0} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0B00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT0} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0B00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{REG_TT0,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0C00}, {0}, {ofEa,ofSpecReg}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT1} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0C00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT0} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0C00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{REG_TT0,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0D00}, {0}, {ofEa,ofSpecReg}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT1} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0E00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT1} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0F00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TT1} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0E00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{REG_TT1,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x0F00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{REG_TT1,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4000}, {0}, {ofEa,ofSpecReg}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TC} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4100}, {0}, {ofEa,ofSpecReg}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TC} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4200}, {0}, {ofSpecReg,ofEa}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TC} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4300}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_TC} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4200}, {0}, {ofSpecReg,ofEa}, "PMOVE",{REG_TC,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4300}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{REG_TC,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4800}, {0}, {ofEa,ofSpecReg}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_SRP} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4900}, {0}, {ofEa,ofSpecReg}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_SRP} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4A00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_SRP} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4B00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_SRP} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4A00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{REG_SRP,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_SRP} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4B00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{REG_SRP,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_SRP} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4C00}, {0}, {ofEa,ofSpecReg}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_CRP} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4D00}, {0}, {ofEa,ofSpecReg}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_CRP} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4e00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_CRP} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4f00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_CRP} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4e00}, {0}, {ofSpecReg,ofEa}, "PMOVE",{REG_CRP,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x4f00}, {0}, {ofSpecReg,ofEa}, "PMOVEFD",{REG_CRP,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
 	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x6000}, {0}, {ofEa,ofSpecReg}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_MMUSR} },
-	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x6200}, {0}, {ofSpecReg,ofEa}, "PMOVE",{EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel,REG_MMUSR} },
+	{ MC_PMMU|MC68030, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x6200}, {0}, {ofSpecReg,ofEa}, "PMOVE",{REG_MMUSR,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
 
 	{ MC_PMMU, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xffff, 0x2800}, {0}, {ofSpecReg,ofEa}, "PVALID",{REG_VAL,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
 	{ MC_PMMU, {0xffc0, 0xf000|(PMMU_COPROC_ID<<9), 0xfff8, 0x2C00}, {0}, {ofExtRegA0,ofEa}, "PVALID",{0,EA_Dn|EA_An|EA_Anip|EA_piAn|EA_Immed|EA_PCRel} },
@@ -1721,7 +1759,6 @@ static const OpcodeTableStruct	OpcodeTable[] = {
 static int	Disass68k(long addr, char *labelBuffer, char *opcodeBuffer, char *operandBuffer, char *commentBuffer)
 {
 	long	baseAddr = addr;
-	int		val;
 	int		i;
 	int		count = 0;
 	char	addressLabel[256];
@@ -1822,10 +1859,10 @@ static int	Disass68k(long addr, char *labelBuffer, char *opcodeBuffer, char *ope
 
 	case dtASCString:
 	{
-		int	count = 1;
-		unsigned short	val = Disass68kGetWord(addr+0);
+		unsigned short	opcval = Disass68kGetWord(addr+0);
+		count = 1;
 		strcpy(opcodeBuffer,"DC.B");
-		if((val >> 8) == 0)
+		if ((opcval >> 8) == 0)
 		{
 			strcat(operandBuffer, "0");
 		} else {
@@ -1862,13 +1899,14 @@ static int	Disass68k(long addr, char *labelBuffer, char *opcodeBuffer, char *ope
 	case dtFunctionPointer:
 	{
 		const char	*sp;
+		int		val;
 		val = (Disass68kGetWord(addr) << 16) | Disass68kGetWord(addr+2);
 		sp = Disass68kSymbolName(val, 2);
 		strcpy(opcodeBuffer,"DC.L");
 		if(sp)
 			sprintf(operandBuffer,"%s", sp);
 		else
-			sprintf(operandBuffer,"$%6.6x", val);
+			sprintf(operandBuffer,"$%8.8x", val);
 		return 4;
 	}
 
@@ -1890,13 +1928,12 @@ more:
 	while(1)
 	{
 		unsigned short	opcode[5];
-		unsigned int	i;
 		OpcodeTableStruct	*ots = &OpcodeTable[index++];
 		int	size;
 		char	sizeChar = 0;
 		char	*dbuf;
 		int	ea;
-		unsigned int	maxop;
+		int	maxop;
 
 		if(ots->opcodeName == NULL)
 			break;
@@ -2018,10 +2055,10 @@ more:
 		ea = opcode[0] & 0x3F;
 		dbuf = operandBuffer;
 
-		maxop=(sizeof(ots->op)/sizeof(ots->op[0]));
+		maxop = (int)(sizeof(ots->op)/sizeof(ots->op[0]));
 		for(i=0; i<maxop; ++i)
 		{
-			int reg;
+			int reg, val;
 
 			switch(ots->op[i])
 			{
@@ -2446,15 +2483,15 @@ static void Disass68k_loop (FILE *f, uaecptr addr, uaecptr *nextpc, int cnt)
 	}
 
 	while (cnt-- > 0) {
-		const int	addrWidth = 6;		// 6 on an ST, 8 on a TT
+		const int	addrWidth = 8;		// 6 on an ST (24 bit addressing), 8 on a TT (32 bit addressing)
 		char	lineBuffer[1024];
 
 		char	addressBuffer[32];
 		char	hexdumpBuffer[256];
-		char	labelBuffer[256];
+		char	labelBuffer[258];
 		char	opcodeBuffer[64];
 		char	operandBuffer[256];
-		char	commentBuffer[256];
+		char	commentBuffer[258];
 		int	plen, len, j;
 
 		len = Disass68k(addr, labelBuffer, opcodeBuffer, operandBuffer, commentBuffer);
@@ -2500,11 +2537,8 @@ static void Disass68k_loop (FILE *f, uaecptr addr, uaecptr *nextpc, int cnt)
 		}
 		if (optionPosComment >= 0)
 		{
-			float percentage;
-			Uint32 count, cycles, misses;
-			if (Profile_CpuAddressData(addr, &percentage, &count, &cycles, &misses))
+			if (Profile_CpuAddr_DataStr(commentBuffer, sizeof(commentBuffer), addr))
 			{
-				sprintf(commentBuffer, "%5.2f%% (%u, %u, %u)", percentage, count, cycles, misses);
 				Disass68kComposeStr(lineBuffer, commentBuffer, optionPosComment+1, 0);
 			}
 			/* show comments only if profile data is missing */
@@ -2545,7 +2579,11 @@ Uint32 Disasm_GetNextPC(Uint32 pc)
 void Disasm (FILE *f, uaecptr addr, uaecptr *nextpc, int cnt)
 {
 	if (ConfigureParams.Debugger.bDisasmUAE)
+#ifdef WINUAE_FOR_HATARI
+		m68k_disasm_file (f, addr, nextpc, addr, cnt);
+#else
 		m68k_disasm (f, addr, nextpc, cnt);
+#endif
 	else
 		Disass68k_loop (f, addr, nextpc, cnt);
 }
@@ -2574,7 +2612,6 @@ void Disasm_GetColumns(int *pos)
  */
 void Disasm_SetColumns(int *pos)
 {
-	Disasm_CheckOptionEngine();
 	optionPosAddress = pos[DISASM_COLUMN_ADDRESS];
 	optionPosHexdump = pos[DISASM_COLUMN_HEXDUMP];
 	optionPosLabel   = pos[DISASM_COLUMN_LABEL];
@@ -2625,22 +2662,24 @@ int Disasm_GetOptions(void)
 /**
  * Set CPU and FPU mask used for disassembly (when changed from the UI or the options)
  */
-void Disasm_SetCPUType ( int CPU , int FPU )
+void Disasm_SetCPUType(int CPU, int FPU, bool bMMU)
 {
-	optionCPUTypeMask = 0;
+	switch (CPU)
+	{
+	 case 0:  optionCPUTypeMask = MC68000; break;
+	 case 1:  optionCPUTypeMask = MC68010; break;
+	 case 2:  optionCPUTypeMask = MC68020; break;
+	 case 3:  optionCPUTypeMask = MC68030; break;
+	 case 4:  optionCPUTypeMask = MC68040; break;
+	 case 5:  optionCPUTypeMask = MC68060; break; /* special case: 5 => 060 */
+	 default: optionCPUTypeMask = MC68000; break;
+	}
 
-	if ( ( FPU == 68881 ) || ( FPU == 68882 ) )
+	if (FPU != 0)
 		optionCPUTypeMask |= MC_FPU;
 
-	switch ( CPU )
-	{
-		case 0 :	optionCPUTypeMask |= MC68000 ; break;
-		case 1 :	optionCPUTypeMask |= MC68010 ; break;
-		case 2 :	optionCPUTypeMask |= MC68020 ; break;
-		case 3 :	optionCPUTypeMask |= MC68030 ; break;
-		case 4 :	optionCPUTypeMask |= MC68040 ; break;
-		default :	optionCPUTypeMask |= MC68000 ; break;
-	}	
+	if (bMMU)
+		optionCPUTypeMask |= MC_PMMU;
 }
 
 /**
@@ -2673,7 +2712,7 @@ const char *Disasm_ParseOption(const char *arg)
 			assert(option[i].flag == (1 << i));
 			fprintf(stderr, "\t%d: %s\n", option[i].flag, option[i].desc);
 		}
-		fprintf(stderr, "Current settings are:\n\t--disasm %s --disasm %d\n",
+		fprintf(stderr, "Current settings are:\n\t--disasm %s --disasm 0x%x\n",
 			ConfigureParams.Debugger.bDisasmUAE ? "uae" : "ext",
 			ConfigureParams.Debugger.nDisasmOptions);
 		return "";
@@ -2693,7 +2732,12 @@ const char *Disasm_ParseOption(const char *arg)
 	}
 	if (isdigit((unsigned char)*arg))
 	{
-		int newopt = atoi(arg);
+		char *end;
+		int newopt = strtol(arg, &end, 0);
+		if (*end)
+		{
+			return "not a number";
+		}
 		if ((newopt|optionsMask) != optionsMask)
 		{
 			return "unknown flags in the bitmask";

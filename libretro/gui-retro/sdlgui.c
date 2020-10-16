@@ -767,7 +767,7 @@ static int SDLGui_SearchFlaggedButton(const SGOBJ *dlg, int flag)
  * pressed or SDLGUI_UNKNOWNEVENT if an unsupported event occurred (will be
  * stored in parameter pEventOut).
  */
-int SDLGui_DoDialog(SGOBJ *dlg, SDL_Event *pEventOut)
+int SDLGui_DoDialog(SGOBJ *dlg, SDL_Event *pEventOut, bool KeepCurrentObject)
 {
 	int obj=0;
 	int oldbutton=0;

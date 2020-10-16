@@ -22,10 +22,17 @@ extern uae_u8 *IOmemory;
 #endif  /* ENABLE_SMALL_MEM */
 
 
+extern int nIoMemAccessSize;
+extern Uint32 IoAccessFullAddress;
 extern Uint32 IoAccessBaseAddress;
 extern Uint32 IoAccessCurrentAddress;
-extern int nIoMemAccessSize;
 
+extern int	IoAccessInstrCount;
+
+enum FALCON_BUS_MODE {
+	STE_BUS_COMPATIBLE,
+	FALCON_ONLY_BUS
+};
 
 /**
  * Read 32-bit word from IO memory space without interception.
@@ -93,17 +100,23 @@ static inline void IoMem_WriteByte(Uint32 Address, Uint8 Var)
 
 extern void IoMem_Init(void);
 extern void IoMem_UnInit(void);
-extern void IoMem_Init_FalconInSTeBuscompatibilityMode(Uint8 value);
+extern void IoMem_Reset(void);
 
+extern Uint8 IoMemTabMegaSTE_DIPSwitches_Read(void);
 
-extern uae_u32 IoMem_bget(uaecptr addr);
-extern uae_u32 IoMem_wget(uaecptr addr);
-extern uae_u32 IoMem_lget(uaecptr addr);
+extern Uint8 IoMemTabFalcon_DIPSwitches_Read(void);
+extern void IoMem_SetFalconBusMode(enum FALCON_BUS_MODE mode);
+extern bool IoMem_IsFalconBusMode(void);
 
-extern void IoMem_bput(uaecptr addr, uae_u32 val);
-extern void IoMem_wput(uaecptr addr, uae_u32 val);
-extern void IoMem_lput(uaecptr addr, uae_u32 val);
+extern uae_u32 REGPARAM3 IoMem_bget(uaecptr addr);
+extern uae_u32 REGPARAM3 IoMem_wget(uaecptr addr);
+extern uae_u32 REGPARAM3 IoMem_lget(uaecptr addr);
 
+extern void REGPARAM3 IoMem_bput(uaecptr addr, uae_u32 val);
+extern void REGPARAM3 IoMem_wput(uaecptr addr, uae_u32 val);
+extern void REGPARAM3 IoMem_lput(uaecptr addr, uae_u32 val);
+
+extern bool IoMem_CheckBusError ( Uint32 addr );
 extern void IoMem_BusErrorEvenReadAccess(void);
 extern void IoMem_BusErrorOddReadAccess(void);
 extern void IoMem_BusErrorEvenWriteAccess(void);

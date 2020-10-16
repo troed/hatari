@@ -56,7 +56,7 @@ void Dialog_AboutDlg(void)
 	SDLGui_CenterDlg(aboutdlg);
         do
 	{
-                but=SDLGui_DoDialog(aboutdlg, NULL);
+                but=SDLGui_DoDialog(aboutdlg, NULL, false);
                 gui_poll_events();
 
         }

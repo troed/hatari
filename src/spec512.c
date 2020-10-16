@@ -24,7 +24,7 @@
 /*			as it doesn't support movem for example. Use Cycles_GetCounter with	*/
 /*			an average  correction of 8 cycles (this should be fixed).		*/
 /*			In Spec512_StartScanLine, better handling of SCREENBYTES_LEFT when	*/
-/*			border are present. Better alignement of pixel and color when left	*/
+/*			border are present. Better alignment of pixel and color when left	*/
 /*			border is removed (Rotofull in Nostalgia Demo, When Colors Are Going	*/
 /*			Bang Bang by DF in Punish Your Machine).				*/
 /* 2008/01/13	[NP]	In Spec512_StoreCyclePalette, if a movem was used to access several	*/
@@ -45,8 +45,8 @@
 /* 2008/01/24	[NP]	In Spec512_StartScanLine, use different values for LineStartCycle when	*/
 /*			running in 50 Hz or 60 Hz (TEX Spectrum Slideshow in 60 Hz).		*/
 /* 2008/12/14	[NP]	In Spec512_StoreCyclePalette, instead of approximating write position	*/
-/*			by Cycles_GetCounter+8, we use different cases for movem, .l acces and	*/
-/*			.w acces (similar to cycles.c). This gives correct results when using	*/
+/*			by Cycles_GetCounter+8, we use different cases for movem, .l access and	*/
+/*			.w access (similar to cycles.c). This gives correct results when using	*/
 /*			"move.w d0,(a0) or move.w (a0)+,(a1)+" for example, which were shifted	*/
 /*			8 or 4 pixels too late. Calibration was made using a custom program to	*/
 /*			compare the results with a real STF in different cases (fix Froggies	*/
@@ -57,13 +57,21 @@
 /* 2009/07/28	[NP]	Use different timings for movem.l and movem.w				*/
 /* 2014/01/02	[NP]	In Spec512_StoreCyclePalette, write occurs during the last cycles for	*/
 /*			i_ADD and i_SUB (fix 'add d1,(a0)' in '4-pixel plasma' by TOS Crew).	*/
+/* 2015/09/25	[NP]	In Spec512_StoreCyclePalette, fix 'move.l' and 'movem' when used with	*/
+/*			the new WinUAE CPU core (move.l accesses for IO registers are in fact	*/
+/*			not possible on a 68000 STF, this is a bug in old UAE CPU core.		*/
+/*			A 'move.l' does 2 word accesses because STF bus is 16 bits)		*/
+/* 2015/10/02	[NP]	In Spec512_StoreCyclePalette, move the code to handle specific cycles	*/
+/*			for some opcodes into cycles.c and use Cycles_GetCounterOnWriteAccess()	*/
+/*			instead for all cases.							*/
 
 
-const char Spec512_fileid[] = "Hatari spec512.c : " __DATE__ " " __TIME__;
+const char Spec512_fileid[] = "Hatari spec512.c";
 
 #include <SDL_endian.h>
 
 #include "main.h"
+#include "configuration.h"
 #include "cycles.h"
 #include "cycInt.h"
 #include "m68000.h"
@@ -71,7 +79,6 @@ const char Spec512_fileid[] = "Hatari spec512.c : " __DATE__ " " __TIME__;
 #include "screen.h"
 #include "spec512.h"
 #include "video.h"
-#include "configuration.h"
 
 
 /* As 68000 clock multiple of 4 this mean we can only write to the palette this many time per scanline */
@@ -147,6 +154,7 @@ void Spec512_StoreCyclePalette(Uint16 col, Uint32 addr)
 {
 	CYCLEPALETTE *pTmpCyclePalette;
 	int FrameCycles, ScanLine, nHorPos;
+	int	CycleEnd;
 
 	if (!ConfigureParams.Screen.nSpec512Threshold)
 		return;
@@ -155,51 +163,19 @@ void Spec512_StoreCyclePalette(Uint16 col, Uint32 addr)
 	CycleColourIndex = (addr-0xff8240)>>1;
 
 	/* Find number of cycles into frame */
-	/* FIXME [NP] We should use Cycles_GetCounterOnWriteAccess, but it wouldn't	*/
-	/* work when using multiple accesses instructions like move.l or movem	*/
-	/* To correct this, assume a delay of 8 cycles (should give a good approximation */
-	/* of a move.w or movem.l for example) */
-	//  FrameCycles = Cycles_GetCounterOnWriteAccess(CYCLES_COUNTER_VIDEO);
-	if ( BusMode == BUS_MODE_BLITTER )
-	{
-		FrameCycles = Cycles_GetCounterOnWriteAccess(CYCLES_COUNTER_VIDEO);
-	}
-	else							/* BUS_MODE_CPU */
-	{
-#ifdef OLD_CYC_PAL
-		FrameCycles = Cycles_GetCounter(CYCLES_COUNTER_VIDEO) + 8;
-#else
-		if ( OpcodeFamily == i_MVMLE )
-		{
-//			FrameCycles = Cycles_GetCounter(CYCLES_COUNTER_VIDEO) + 8;
-			FrameCycles = Cycles_GetCounter(CYCLES_COUNTER_VIDEO)
-			              + (CurrentInstrCycles & ~3);
-			if (nIoMemAccessSize == SIZE_LONG)	/* long access */
-				FrameCycles -= 0;
-			else					/* word access */
-				FrameCycles -= 4;
-		}
-		else if ( ( OpcodeFamily == i_ADD ) || ( OpcodeFamily == i_SUB ) )
-		{
-			FrameCycles = Cycles_GetCounter(CYCLES_COUNTER_VIDEO)
-			              + (CurrentInstrCycles & ~3);
-			FrameCycles -= 0;			/* write is made at the end, after prefetch */
-		}
-		else						/* default case write, then prefetch (mostly for 'move') */
-		{
-			FrameCycles = Cycles_GetCounter(CYCLES_COUNTER_VIDEO)
-			              + (CurrentInstrCycles & ~3);
-			if (nIoMemAccessSize == SIZE_LONG)	/* long access */
-				FrameCycles -= 8;
-			else					/* word/byte access */
-				FrameCycles -= 4;
-		}
-#endif
-	}
-
+	FrameCycles = Cycles_GetCounterOnWriteAccess(CYCLES_COUNTER_VIDEO);
 
 	/* Find scan line we are currently on and get index into cycle-palette table */
 	Video_ConvertPosition ( FrameCycles , &ScanLine , &nHorPos );	
+
+	CycleEnd = nCyclesPerLine;
+	if ( nCpuFreqShift )				/* if cpu freq is 16 or 32 MHz */
+	{
+		/* Convert cycle position to 8 MHz equivalent and round to 4 cycles */
+		nHorPos >>= nCpuFreqShift;
+		nHorPos &= ~3;
+		CycleEnd >>= nCpuFreqShift;
+	}
 
 	if (ScanLine > MAX_SCANLINES_PER_FRAME)
 		return;
@@ -215,7 +191,7 @@ void Spec512_StoreCyclePalette(Uint16 col, Uint32 addr)
 		if ((pTmpCyclePalette-1)->LineCycles >= nHorPos)
 			nHorPos = (pTmpCyclePalette-1)->LineCycles + 4;
 
-		if ( nHorPos >= nCyclesPerLine )	/* end of line reached, continue on the next line */
+		if ( nHorPos >= CycleEnd )		/* end of line reached, continue on the next line */
 		{
 			ScanLine++;
 			pTmpCyclePalette = &CyclePalettes[ (ScanLine*MAX_CYCLEPALETTES_PERLINE) + nCyclePalettes[ScanLine] ];
@@ -228,12 +204,12 @@ void Spec512_StoreCyclePalette(Uint16 col, Uint32 addr)
 	pTmpCyclePalette->Colour = CycleColour;           /* Store ST/STe color RGB */
 	pTmpCyclePalette->Index = CycleColourIndex;       /* And index (0...15) */
 
-	if ( 0 && LOG_TRACE_LEVEL(TRACE_VIDEO_COLOR))
+	if ( 1 && LOG_TRACE_LEVEL(TRACE_VIDEO_COLOR))
 	{
 		int FrameCycles, HblCounterVideo, LineCycles;
 
 		Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
-		LOG_TRACE_PRINT("spec store col line %d cyc=%d col=%x idx=%d video_cyc=%d %d@%d pc=%x instr_cyc=%d\n",
+		LOG_TRACE_PRINT("spec store col line %d cyc=%d col=%03x idx=%d video_cyc=%d %d@%d pc=%x instr_cyc=%d\n",
 				ScanLine, nHorPos, CycleColour, CycleColourIndex, FrameCycles,
 				LineCycles, HblCounterVideo, M68000_GetPC(), CurrentInstrCycles);
 	}
@@ -281,7 +257,7 @@ void Spec512_StartFrame(void)
 
 	/* Ready for first call to 'Spec512_ScanLine' */
 	nScanLine = 0;
-	if (OverscanMode & OVERSCANMODE_TOP)
+	if (VerticalOverscan & V_OVERSCAN_NO_TOP)
 		nScanLine += OVERSCAN_TOP;
 
 	/* Skip to first line(where start to draw screen from) */
@@ -329,12 +305,7 @@ void Spec512_StartScanLine(void)
 
 	/* Update palette entries until we reach start of displayed screen */
 	ScanLineCycleCount = 0;
-//	for(i=0; i<((SCREEN_START_CYCLE-16)/4); i++)  /* This '16' is as we've already added in the 'move' instruction timing */
-#ifdef OLD_CYC_PAL
-	for (i=0; i<((LineStartCycle-SCREENBYTES_LEFT*2)/4 + 6); i++)	/* [NP] '6' is required to align pixels and colors */
-#else
 	for (i=0; i<((LineStartCycle-SCREENBYTES_LEFT*2)/4 + 7); i++)	/* [NP] '7' is required to align pixels and colors */
-#endif
 		Spec512_UpdatePaletteSpan();              /* Update palette for this 4-cycle period */
 
 	/* And skip for left border is not using overscan display to user */
@@ -349,8 +320,11 @@ void Spec512_StartScanLine(void)
  */
 void Spec512_EndScanLine(void)
 {
+	int	CycleEnd = nCyclesPerLine;
+
+	CycleEnd >>= nCpuFreqShift;			/* Convert cycle position to 8 MHz equivalent */
 	/* Continue to reads palette until complete so have correct version for next line */
-	while (ScanLineCycleCount < nCyclesPerLine)
+	while (ScanLineCycleCount < CycleEnd)
 		Spec512_UpdatePaletteSpan();
 }
 

@@ -5,7 +5,7 @@
   or at your option any later version. Read the file gpl.txt for details.
 
   Falcon Crossbar (Matrice) emulation.
-  input device:	
+  input device:
 		- DSP transmit (SSI)
 		- external DSP connector
 		- ADC (micro + PSG chip)
@@ -22,7 +22,7 @@
 		- internal clock 32 MHz
 		- external clock (DSP external port, up to 32 Mhz)
 
-  Transfers between 2 devices can use handshaking or continuous mode 
+  Transfers between 2 devices can use handshaking or continuous mode
 
   Hardware I/O registers:
     $FF8900 (byte) : Sound DMA control
@@ -53,7 +53,7 @@
 
 
     Crossbar schematics:
-    
+
        - one receiving device can be connected to only one source device
        - one source device can be connected to multiple receiving device
 
@@ -66,7 +66,7 @@
                               TRANSMIT    |      |      |     |
                                           |      |      |     |
    Mic L -----|                  DMA   ---O------O------O-----O
-          /---|XOR ----|\     PLAYBACK    |      |      |     |      
+          /---|XOR ----|\     PLAYBACK    |      |      |     |
    PSG --|             | \                |      |      |     |
           \---|        | /-------X--------O------O------O-----O
    Mic R -----|XOR ----|/        |        |      |      |     |
@@ -84,17 +84,19 @@
                                       |
                                       |
                                 Output to:
-                                   - header, 
-                                   - internal speaker, 
-                                   - monitor speaker   
+                                   - header,
+                                   - internal speaker,
+                                   - monitor speaker
 */
 
-const char crossbar_fileid[] = "Hatari Crossbar.c : " __DATE__ " " __TIME__;
+const char crossbar_fileid[] = "Hatari Crossbar.c";
 
 #include "main.h"
 #include "audio.h"
 #include "configuration.h"
 #include "cycInt.h"
+#include "dmaSnd.h"
+#include "m68000.h"
 #include "ioMem.h"
 #include "log.h"
 #include "memorySnapShot.h"
@@ -104,6 +106,8 @@ const char crossbar_fileid[] = "Hatari Crossbar.c : " __DATE__ " " __TIME__;
 #include "microphone.h"
 #include "stMemory.h"
 #include "dsp.h"
+#include "clocks_timings.h"
+
 
 
 #define DACBUFFER_SIZE    2048
@@ -112,7 +116,6 @@ const char crossbar_fileid[] = "Hatari Crossbar.c : " __DATE__ " " __TIME__;
 
 /* Crossbar internal functions */
 static int  Crossbar_DetectSampleRate(Uint16 clock);
-static void Crossbar_Recalculate_Clocks_Cycles(void);
 static void Crossbar_Start_InterruptHandler_25Mhz(void);
 static void Crossbar_Start_InterruptHandler_32Mhz(void);
 
@@ -138,7 +141,7 @@ static void Crossbar_Process_ADCXmit_Transfer(void);
 /* external data used by the MFP */
 Uint16 nCbar_DmaSoundControl;
 
-/* internal datas */
+/* internal data */
 
 /* dB = 20log(gain)  :  gain = antilog(dB/20)                                  */
 /* Table gain values = (int)(powf(10.0, dB/20.0)*65536.0 + 0.5)  1.5dB steps   */
@@ -146,7 +149,7 @@ Uint16 nCbar_DmaSoundControl;
 /* Values for Codec's ADC volume control (* DECIMAL_PRECISION) */
 /* PSG must be amplified by 2.66.. before mixing with crossbar */
 /* The ADC table values are multiplied by 2'2/3 and divided    */
-/* by 4 (later multplied by 4) eg 43691 = 65536 * 2.66.. / 4.0 */
+/* by 4 (later multiplied by 4) eg 43691 = 65536 * 2.66.. / 4.0 */
 static const Uint16 Crossbar_ADC_volume_table[16] =
 {
 	3276,   3894,   4628,   5500,   6537,   7769,   9234,   10975,
@@ -243,7 +246,7 @@ struct crossbar_s {
 	Uint16 attenuationSettingLeft;	/* Left channel attenuation for DAC */
 	Uint16 attenuationSettingRight;	/* Right channel attenuation for DAC */
 	Uint16 microphone_ADC_is_started;
-	
+
 	Uint32 clock25_cycles;		/* cycles for 25 Mzh interrupt */
 	Uint32 clock25_cycles_decimal;  /* decimal part of cycles counter for 25 Mzh interrupt (*DECIMAL_PRECISION) */
 	Uint32 clock25_cycles_counter;  /* Cycle counter for 25 Mhz interrupts */
@@ -254,7 +257,7 @@ struct crossbar_s {
 	Uint32 pendingCyclesOver32;	/* Number of delayed cycles for the interrupt */
 	Sint64 frequence_ratio;		/* Ratio between host computer's sound frequency and hatari's sound frequency */
 	Sint64 frequence_ratio2;	/* Ratio between hatari's sound frequency and host computer's sound frequency */
-	
+
 	Uint32 dmaPlay_CurrentFrameStart;   /* current DmaPlay Frame start ($ff8903 $ff8905 $ff8907) */
 	Uint32 dmaPlay_CurrentFrameCount;   /* current DmaRecord Frame start ($ff8903 $ff8905 $ff8907) */
 	Uint32 dmaPlay_CurrentFrameEnd;     /* current DmaRecord Frame start ($ff8903 $ff8905 $ff8907) */
@@ -263,8 +266,10 @@ struct crossbar_s {
 	Uint32 dmaRecord_CurrentFrameEnd;   /* current DmaRecord Frame end ($ff890f $ff8911 $ff8913) */
 	Uint32 adc2dac_readBufferPosition;  /* read position for direct adc->dac transfer */
 	Sint64 adc2dac_readBufferPosition_float; /* float value of read position for direct adc->dac transfer index */
-	
+
 	Uint32 save_special_transfer;		/* Used in a special undocumented transfer mode (dsp sent is not in handshake mode and dsp receive is in handshake mode) */
+
+	Uint8  SNDINT_Signal;		/* Value of the SNDINT/SOUNDINT signal (connected to MFP) */
 };
 
 struct codec_s {
@@ -281,7 +286,7 @@ struct codec_s {
 
 struct dsp_s {
 	Uint32 isTristated;		/* 0 = DSP is not tristated; 1 = DSP is tristated */
-	Uint32 isInHandshakeMode;	/* 0 = not in hanshake mode; 1 = in hanshake mode */
+	Uint32 isInHandshakeMode;	/* 0 = not in handshake mode; 1 = in handshake mode */
 	Uint32 isConnectedToCodec;
 	Uint32 isConnectedToDsp;
 	Uint32 isConnectedToDma;
@@ -303,10 +308,6 @@ void Crossbar_Reset(bool bCold)
 {
 	nCbar_DmaSoundControl = 0;
 
-	if (bCold)
-	{
-	}
-	
 	/* Stop DMA sound playing / record */
 	IoMem_WriteByte(0xff8901,0);
 	dmaPlay.isRunning = 0;
@@ -320,12 +321,18 @@ void Crossbar_Reset(bool bCold)
 	dmaRecord.isConnectedToDspInHandShakeMode = 0;
 	dmaRecord.handshakeMode_Frame = 0;
 
+	/* DMA stopped, force SNDINT to 0/LOW */
+	crossbar.SNDINT_Signal = MFP_GPIP_STATE_LOW;
+	MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE7 , MFP_GPIP_STATE_LOW );
+	MFP_TimerA_Set_Line_Input ( pMFP_Main , MFP_GPIP_STATE_LOW );
+
+
 	/* DAC inits */
 	memset(dac.buffer_left, 0, sizeof(dac.buffer_left));
 	memset(dac.buffer_right, 0, sizeof(dac.buffer_right));
 	dac.readPosition_float = 0;
 	dac.readPosition = 0;
-	dac.writePosition = 0;
+	dac.writePosition = (dac.readPosition+DACBUFFER_SIZE/2)%DACBUFFER_SIZE;
 
 	/* ADC inits */
 	memset(adc.buffer_left, 0, sizeof(adc.buffer_left));
@@ -372,13 +379,13 @@ void Crossbar_Reset(bool bCold)
 	Crossbar_Start_InterruptHandler_32Mhz();
 
 	/* Start Microphone jack emulation */
-	if (crossbar.microphone_ADC_is_started == 0) { 
+	if (crossbar.microphone_ADC_is_started == 0) {
 		crossbar.microphone_ADC_is_started = Microphone_Start((int)nAudioFrequency);
 	}
 
 	/* Initialize special transfer mode */
 	crossbar.save_special_transfer = 0;
-	
+
 	/* Initialize Crossbar values after reboot */
 	IoMem_WriteByte(0xff8900,0x05);
 	IoMem_WriteByte(0xff8903,0xff);
@@ -407,6 +414,10 @@ void Crossbar_MemorySnapShot_Capture(bool bSave)
 	MemorySnapShot_Store(&adc, sizeof(adc));
 	MemorySnapShot_Store(&dspXmit, sizeof(dspXmit));
 	MemorySnapShot_Store(&dspReceive, sizeof(dspReceive));
+
+	/* After restoring, update the clock/freq counters */
+	if ( !bSave )
+		Crossbar_Recalculate_Clocks_Cycles();
 }
 
 
@@ -414,11 +425,59 @@ void Crossbar_MemorySnapShot_Capture(bool bSave)
 /*	Hardware I/O functions						*/
 /*----------------------------------------------------------------------*/
 
+/*-----------------------------------------------------------------------*/
+/**
+ * Update the value of the SNDINT/SOUNDINT line ; this line is connected to TAI and to GPIP7
+ * Depending on the transition, this can trigger MFP interrupt for Timer A or for GPIP7
+ *  - Bit is set to 0/LOW when dma sound is idle
+ *  - Bit is set to 1/HIGH when dma sound is playing / recording
+ */
+static void Crossbar_Update_SNDINT_Line ( bool RecordMode , Uint8 Bit )
+{
+	if ( !RecordMode )
+	{
+		/* Send a MFP15_Int (I7) at end of replay buffer if enabled */
+		if (dmaPlay.mfp15_int) {
+			crossbar.SNDINT_Signal = Bit;
+			MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE7 , Bit );
+			LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP15 (IT7) interrupt from DMA play\n");
+		}
+
+		/* Send a TimerA_Int at end of replay buffer if enabled */
+		if (dmaPlay.timerA_int) {
+			crossbar.SNDINT_Signal = Bit;
+			MFP_TimerA_Set_Line_Input ( pMFP_Main , Bit );			/* Update events count / interrupt for timer A if needed */
+			LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP Timer A interrupt from DMA play\n");
+		}
+	}
+
+	else
+	{
+		/* Send a MFP15_Int (I7) at end of record buffer if enabled */
+		if (dmaRecord.mfp15_int) {
+			crossbar.SNDINT_Signal = Bit;
+			MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE7 , Bit );
+			LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP15 (IT7) interrupt from DMA record\n");
+		}
+
+		/* Send a TimerA_Int at end of record buffer if enabled */
+		if (dmaRecord.timerA_int) {
+			crossbar.SNDINT_Signal = Bit;
+			MFP_TimerA_Set_Line_Input ( pMFP_Main , Bit );			/* Update events count / interrupt for timer A if needed */
+			LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP Timer A interrupt from DMA record\n");
+		}
+	}
+
+// 	MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE7 , Bit );
+// 	MFP_TimerA_Set_Line_Input ( pMFP_Main , Bit );			/* Update events count / interrupt for timer A if needed */
+}
+
+
 /**
  * Write byte to Microwire Mask register(0xff8924).
  * Note: On Falcon, the Microwire is not present.
  *       But for compatibility with the STe, Atari implemented the Microwire
- *       as follow (when one writes at the following address): 
+ *       as follow (when one writes at the following address):
  *       $ff8922: always reads 0 for any value written at this address
  *       $ff8924: NOT the value, then 8 cycles later, NOT the value again to its initial value.
  */
@@ -483,8 +542,8 @@ void Crossbar_DmaCtrlReg_WriteByte(void)
 	{
 		/* Turning on DMA Play sound emulation */
 		dmaPlay.isRunning = 1;
-		nCbar_DmaSoundControl = sndCtrl;
 		dmaPlay.loopMode = (sndCtrl & 0x2) >> 1;
+		nCbar_DmaSoundControl = sndCtrl;
 		Crossbar_setDmaPlay_Settings();
 	}
 	else if (dmaPlay.isRunning && ((sndCtrl & CROSSBAR_SNDCTRL_PLAY) == 0))
@@ -496,6 +555,7 @@ void Crossbar_DmaCtrlReg_WriteByte(void)
 		dmaPlay.isRunning = 0;
 		dmaPlay.loopMode = 0;
 		nCbar_DmaSoundControl = sndCtrl;
+		Crossbar_Update_SNDINT_Line ( false , MFP_GPIP_STATE_LOW );	/* O/LOW=dma sound idle */
 	}
 
 	/* DMA Record mode */
@@ -503,8 +563,8 @@ void Crossbar_DmaCtrlReg_WriteByte(void)
 	{
 		/* Turning on DMA record sound emulation */
 		dmaRecord.isRunning = 1;
-		nCbar_DmaSoundControl = sndCtrl;
 		dmaRecord.loopMode = (sndCtrl & 0x20) >> 5;
+		nCbar_DmaSoundControl = sndCtrl;
 		Crossbar_setDmaRecord_Settings();
 	}
 	else if (dmaRecord.isRunning && ((sndCtrl & CROSSBAR_SNDCTRL_RECORD) == 0))
@@ -513,6 +573,7 @@ void Crossbar_DmaCtrlReg_WriteByte(void)
 		dmaRecord.isRunning = 0;
 		dmaRecord.loopMode = 0;
 		nCbar_DmaSoundControl = sndCtrl;
+		Crossbar_Update_SNDINT_Line ( true , MFP_GPIP_STATE_LOW );	/* O/LOW=dma sound idle */
 	}
 }
 
@@ -880,7 +941,7 @@ void Crossbar_SoundModeCtrl_WriteByte(void)
 
 /**
  * Write word to Falcon Crossbar source controller (0xff8930).
-	Source: A/D Convertor                 BIT 15 14 13 12
+	Source: A/D Converter                 BIT 15 14 13 12
 	00 - 25.175Mhz clock -------------------------+--+
 	01 - External clock --------------------------+--+
 	10 - 32Mhz clock (Don't use) -----------------+--'
@@ -917,14 +978,14 @@ void Crossbar_SrcControler_WriteWord(void)
 
 	dspXmit.isTristated = 1 - ((nCbSrc >> 7) & 0x1);
 	dspXmit.isInHandshakeMode = 1 - ((nCbSrc >> 4) & 0x1);
-	
+
 	crossbar.dspXmit_freq = (nCbSrc >> 5) & 0x3;
 	crossbar.dmaPlay_freq = (nCbSrc >> 1) & 0x3;
 }
 
 /**
  * Write word to Falcon Crossbar destination controller (0xff8932).
-	Source: D/A Convertor                 BIT 15 14 13 12
+	Source: D/A Converter                 BIT 15 14 13 12
 	00 - DMA output ------------------------------+--+
 	01 - DSP output ------------------------------+--+
 	10 - External input --------------------------+--+
@@ -1038,7 +1099,7 @@ void Crossbar_TrackRecSelect_WriteByte(void)
 /**
  * Write byte to CODEC input source from 16 bit adder (0xff8937).
  *	Bit 1 : source = multiplexer
- *	Bit 0 : source = A/D convertor 
+ *	Bit 0 : source = A/D converter
  */
 void Crossbar_CodecInput_WriteByte(void)
 {
@@ -1112,7 +1173,7 @@ void Crossbar_CodecStatus_WriteWord(void)
 /**
  * Recalculates internal clocks 25 Mhz and 32 Mhz cycles
  */
-static void Crossbar_Recalculate_Clocks_Cycles(void)
+void Crossbar_Recalculate_Clocks_Cycles(void)
 {
 	double cyclesClk;
 
@@ -1120,15 +1181,19 @@ static void Crossbar_Recalculate_Clocks_Cycles(void)
 	crossbar.clock32_cycles_counter = 0;
 
 	/* Calculate 25 Mhz clock cycles */
-	cyclesClk = ((double)CPU_FREQ / Crossbar_DetectSampleRate(25)) / (double)(crossbar.playTracks) / 2.0;
+	/* Take nCpuFreqShift into account to keep a constant sound rate at all cpu freq */
+	cyclesClk = ((double)( ( CPU_FREQ << nCpuFreqShift ) ) / Crossbar_DetectSampleRate(25)) / (double)(crossbar.playTracks) / 2.0;
+
 	crossbar.clock25_cycles = (int)(cyclesClk);
 	crossbar.clock25_cycles_decimal = (int)((cyclesClk - (double)(crossbar.clock25_cycles)) * (double)DECIMAL_PRECISION);
 
 	/* Calculate 32 Mhz clock cycles */
-	cyclesClk = ((double)CPU_FREQ / Crossbar_DetectSampleRate(32)) / (double)(crossbar.playTracks) / 2.0;
+	/* Take nCpuFreqShift into account to keep a constant sound rate at all cpu freq */
+	cyclesClk = ((double)( ( CPU_FREQ << nCpuFreqShift ) ) / Crossbar_DetectSampleRate(32)) / (double)(crossbar.playTracks) / 2.0;
+
 	crossbar.clock32_cycles = (int)(cyclesClk);
 	crossbar.clock32_cycles_decimal = (int)((cyclesClk - (double)(crossbar.clock32_cycles)) * (double)DECIMAL_PRECISION);
-	
+
 	LOG_TRACE(TRACE_CROSSBAR, "Crossbar : Recalculate_clock_Cycles\n");
 	LOG_TRACE(TRACE_CROSSBAR, "           clock25 : %d\n", crossbar.clock25_cycles);
 	LOG_TRACE(TRACE_CROSSBAR, "           clock32 : %d\n", crossbar.clock32_cycles);
@@ -1138,7 +1203,7 @@ static void Crossbar_Recalculate_Clocks_Cycles(void)
 	if ((crossbar.int_freq_divider == 0) && (crossbar.steFreq == 0))
 		crossbar.isDacMuted = 1;
 
-	if ((crossbar.int_freq_divider == 6) || (crossbar.int_freq_divider == 8) || 
+	if ((crossbar.int_freq_divider == 6) || (crossbar.int_freq_divider == 8) ||
 	    (crossbar.int_freq_divider == 10) || (crossbar.int_freq_divider >= 12)) {
 		crossbar.isDacMuted = 1;
 		LOG_TRACE(TRACE_CROSSBAR, "           DAC is muted\n");
@@ -1146,10 +1211,14 @@ static void Crossbar_Recalculate_Clocks_Cycles(void)
 
 	// Compute Ratio between host computer sound frequency and Hatari's sound frequency.
 	Crossbar_Compute_Ratio();
+
+	// Ensure dac.writePosition is correctly set based on current dac.readPosition
+	// -> force dac.wordCount=0 to update dac.writePosition on next call to Crossbar_GenerateSamples()
+	dac.wordCount = 0;
 }
 
 /**
- * 	Compute Ratio between host computer sound frequency and Hatari's DAC sound frequency and 
+ * 	Compute Ratio between host computer sound frequency and Hatari's DAC sound frequency and
  * 	ratio between hatari's DAC sound frequency and host's sound frequency.
  * 	Both values use << 32 to simulate floating point precision
  *	Can be called by audio.c if a sound frequency value is changed in the parameter GUI.
@@ -1188,10 +1257,11 @@ static int Crossbar_DetectSampleRate(Uint16 clock)
 static void Crossbar_Start_InterruptHandler_25Mhz(void)
 {
 	Uint32 cycles_25;
-	
+
+//fprintf ( stderr , "start int25 %x %x %x %x\n" , crossbar.clock25_cycles, crossbar.clock25_cycles_counter, crossbar.clock25_cycles_decimal, crossbar.pendingCyclesOver25 );
 	cycles_25 = crossbar.clock25_cycles;
 	crossbar.clock25_cycles_counter += crossbar.clock25_cycles_decimal;
-	
+
 	if (crossbar.clock25_cycles_counter >= DECIMAL_PRECISION) {
 		crossbar.clock25_cycles_counter -= DECIMAL_PRECISION;
 		cycles_25 ++;
@@ -1215,7 +1285,8 @@ static void Crossbar_Start_InterruptHandler_25Mhz(void)
 static void Crossbar_Start_InterruptHandler_32Mhz(void)
 {
 	Uint32 cycles_32;
-	
+
+//fprintf ( stderr , "start int32 %x %x %x %x\n" , crossbar.clock32_cycles, crossbar.clock32_cycles_counter, crossbar.clock32_cycles_decimal, crossbar.pendingCyclesOver32 );
 	cycles_32 = crossbar.clock32_cycles;
 	crossbar.clock32_cycles_counter += crossbar.clock32_cycles_decimal;
 
@@ -1242,6 +1313,7 @@ static void Crossbar_Start_InterruptHandler_32Mhz(void)
  */
 void Crossbar_InterruptHandler_25Mhz(void)
 {
+//fprintf ( stderr , "int25 %x\n" , crossbar.pendingCyclesOver25 );
 	/* How many cycle was this sound interrupt delayed (>= 0) */
 	crossbar.pendingCyclesOver25 += -INT_CONVERT_FROM_INTERNAL ( PendingInterruptCount , INT_CPU_CYCLE );
 
@@ -1253,19 +1325,19 @@ void Crossbar_InterruptHandler_25Mhz(void)
 		Crossbar_Process_DSPXmit_Transfer();
 		Crossbar_Process_DMAPlay_Transfer();
 		Crossbar_Process_ADCXmit_Transfer();
-		
+
 		/* Restart the 25 Mhz clock interrupt */
 		Crossbar_Start_InterruptHandler_25Mhz();
 		return;
 	}
 
 	Crossbar_Process_ADCXmit_Transfer();
-		
+
 	/* DSP Play transfer ? */
 	if (crossbar.dspXmit_freq == CROSSBAR_FREQ_25MHZ) {
 		Crossbar_Process_DSPXmit_Transfer();
 	}
-	
+
 	/* DMA Play transfer ? */
 	if (crossbar.dmaPlay_freq == CROSSBAR_FREQ_25MHZ) {
 		Crossbar_Process_DMAPlay_Transfer();
@@ -1280,6 +1352,7 @@ void Crossbar_InterruptHandler_25Mhz(void)
  */
 void Crossbar_InterruptHandler_32Mhz(void)
 {
+//fprintf ( stderr , "int32 %x\n" , crossbar.pendingCyclesOver32 );
 	/* How many cycle was this sound interrupt delayed (>= 0) */
 	crossbar.pendingCyclesOver32 += -INT_CONVERT_FROM_INTERNAL ( PendingInterruptCount , INT_CPU_CYCLE );
 
@@ -1292,12 +1365,12 @@ void Crossbar_InterruptHandler_32Mhz(void)
 		Crossbar_Start_InterruptHandler_32Mhz();
 		return;
 	}
-	
+
 	/* DSP Play transfer ? */
 	if (crossbar.dspXmit_freq == CROSSBAR_FREQ_32MHZ) {
 		Crossbar_Process_DSPXmit_Transfer();
 	}
-	
+
 	/* DMA Play transfer ? */
 	if (crossbar.dmaPlay_freq == CROSSBAR_FREQ_32MHZ) {
 		Crossbar_Process_DMAPlay_Transfer();
@@ -1319,7 +1392,7 @@ static void Crossbar_Process_DSPXmit_Transfer(void)
 {
 	Uint16 frame=0;
 	Sint32 data;
-	
+
 	/* If DSP Xmit is tristated, do nothing */
 	if (dspXmit.isTristated)
 		return;
@@ -1389,13 +1462,13 @@ static void Crossbar_SendDataToDspReceive(Uint32 value, Uint16 frame)
 	DSP_SsiWriteRxValue(value);
 
 	/* Send the frame status to the DSP SSI receive */
-	/* only in non hanshake mode */
+	/* only in non handshake mode */
 	if (dmaPlay.handshakeMode_Frame == 0) {
 		DSP_SsiReceive_SC1(frame);
 	}
 
 	dmaPlay.handshakeMode_Frame = 0;
-	
+
 	/* Send the clock to the DSP SSI receive */
 	DSP_SsiReceive_SC0();
 }
@@ -1409,7 +1482,7 @@ static void Crossbar_SendDataToDspReceive(Uint32 value, Uint16 frame)
  */
 static void Crossbar_setDmaPlay_Settings(void)
 {
-	/* DMA setings */
+	/* DMA settings */
 	dmaPlay.frameStartAddr = crossbar.dmaPlay_CurrentFrameStart;
 	dmaPlay.frameEndAddr = crossbar.dmaPlay_CurrentFrameEnd;
 	dmaPlay.frameLen = dmaPlay.frameEndAddr - dmaPlay.frameStartAddr;
@@ -1421,6 +1494,9 @@ static void Crossbar_setDmaPlay_Settings(void)
 		Log_Printf(LOG_WARN, "crossbar DMA Play: Illegal buffer size (from 0x%06x to 0x%06x)\n",
 		          dmaPlay.frameStartAddr, dmaPlay.frameEndAddr);
 	}
+
+	/* DMA sound play : update SNDINT */
+	Crossbar_Update_SNDINT_Line ( false , MFP_GPIP_STATE_HIGH );	/* 1/HIGH=dma sound play */
 }
 
 /**
@@ -1432,14 +1508,14 @@ static void Crossbar_Process_DMAPlay_Transfer(void)
 	Sint16 value, eightBits;
 	Sint8  *pFrameStart;
 	Uint8  dmaCtrlReg;
-	
+
 	/* if DMA play is not running, return */
 	if (dmaPlay.isRunning == 0)
 		return;
 
 	pFrameStart = (Sint8 *)&STRam[dmaPlay.frameStartAddr];
 	increment_frame = 0;
-	
+
 	/* 16 bits stereo mode ? */
 	if (crossbar.is16Bits) {
 		eightBits = 1;
@@ -1461,6 +1537,7 @@ static void Crossbar_Process_DMAPlay_Transfer(void)
 		}
 	}
 
+//fprintf ( stderr , "cbar %x %x %x\n" , dmaPlay.frameCounter , value , increment_frame );
 	if (dmaPlay.isConnectedToDspInHandShakeMode) {
 		/* Handshake mode */
 		if (dmaPlay.handshakeMode_Frame == 0)
@@ -1468,10 +1545,10 @@ static void Crossbar_Process_DMAPlay_Transfer(void)
 
 		dmaPlay.frameCounter += increment_frame;
 
-		/* Special undocumented transfer mode : 
+		/* Special undocumented transfer mode :
 		   When DMA Play --> DSP Receive is in HandShake mode at 32 Mhz,
-		   datas are shifted 2 bits on the left after the transfer.
-		   This occurs with all demos using the Mpeg2 player from nocrew (amanita, LostBlubb, Wait, ...) 
+		   data are shifted 2 bits on the left after the transfer.
+		   This occurs with all demos using the Mpeg2 player from nocrew (amanita, LostBlubb, Wait, ...)
 		*/
 		if (crossbar.dmaPlay_freq == CROSSBAR_FREQ_32MHZ) {
 			temp = (crossbar.save_special_transfer<<2) + ((value & 0xc000)>>14);
@@ -1516,24 +1593,13 @@ static void Crossbar_Process_DMAPlay_Transfer(void)
 
 	/* Check if end-of-frame has been reached and raise interrupts if needed. */
 	if (dmaPlay.frameCounter >= dmaPlay.frameLen)
-	{		
-		/* Send a MFP15_Int (I7) at end of replay buffer if enabled */
-		if (dmaPlay.mfp15_int) {
-			MFP_InputOnChannel ( MFP_INT_GPIP7 , 0 );
-			LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP15 (IT7) interrupt from DMA play\n");
-		}
-
-		/* Send a TimerA_Int at end of replay buffer if enabled */
-		if (dmaPlay.timerA_int) {
-			if (MFP_TACR == 0x08) {       /* Is timer A in Event Count mode? */
-				MFP_TimerA_EventCount_Interrupt();
-				LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP Timer A interrupt from DMA play\n");
-			}
-		}
+	{
+		/* DMA sound idle : update SNDINT */
+		Crossbar_Update_SNDINT_Line ( false , MFP_GPIP_STATE_LOW );	/* O/LOW=dma sound idle */
 
 		if (dmaPlay.loopMode) {
 			Crossbar_setDmaPlay_Settings();
-		} 
+		}
 		else {
 			/* Create samples up until this point with current values */
 			Sound_Update(false);
@@ -1565,7 +1631,7 @@ void Crossbar_DmaPlayInHandShakeMode(void)
  */
 static void Crossbar_setDmaRecord_Settings(void)
 {
-	/* DMA setings */
+	/* DMA settings */
 	dmaRecord.frameStartAddr = crossbar.dmaRecord_CurrentFrameStart;
 	dmaRecord.frameEndAddr = crossbar.dmaRecord_CurrentFrameEnd;
 	dmaRecord.frameLen = dmaRecord.frameEndAddr - dmaRecord.frameStartAddr;
@@ -1576,6 +1642,9 @@ static void Crossbar_setDmaRecord_Settings(void)
 		Log_Printf(LOG_WARN, "crossbar DMA Record: Illegal buffer size (from 0x%06x to 0x%06x)\n",
 		          dmaRecord.frameStartAddr, dmaRecord.frameEndAddr);
 	}
+
+	/* DMA sound record : update SNDINT */
+	Crossbar_Update_SNDINT_Line ( true , MFP_GPIP_STATE_HIGH );	/* 1/HIGH=dma sound record */
 }
 
 /**
@@ -1589,7 +1658,7 @@ void Crossbar_SendDataToDmaRecord(Sint16 value)
 	if (dmaRecord.isRunning == 0) {
 		return;
 	}
-	
+
 	pFrameStart = (Sint8 *)&STRam[dmaRecord.frameStartAddr];
 
 	/* 16 bits stereo mode ? */
@@ -1613,18 +1682,8 @@ void Crossbar_SendDataToDmaRecord(Sint16 value)
 	/* Check if end-of-frame has been reached and raise interrupts if needed. */
 	if (dmaRecord.frameCounter >= dmaRecord.frameLen)
 	{
-		/* Send a MFP15_Int (I7) at end of record buffer if enabled */
-		if (dmaRecord.mfp15_int) {
-			MFP_InputOnChannel ( MFP_INT_GPIP7 , 0 );
-			LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP15 (IT7) interrupt from DMA record\n");
-		}
-	
-		/* Send a TimerA_Int at end of record buffer if enabled */
-		if (dmaRecord.timerA_int) {
-			if (MFP_TACR == 0x08)       /* Is timer A in Event Count mode? */
-				MFP_TimerA_EventCount_Interrupt();
-				LOG_TRACE(TRACE_CROSSBAR, "Crossbar : MFP Timer A interrupt from DMA record\n");
-		}
+		/* DMA sound idle : update SNDINT */
+		Crossbar_Update_SNDINT_Line ( true , MFP_GPIP_STATE_LOW );	/* O/LOW=dma sound idle */
 
 		if (dmaRecord.loopMode) {
 			Crossbar_setDmaRecord_Settings();
@@ -1666,7 +1725,7 @@ static void Crossbar_Process_DMARecord_HandshakeMode(void)
 	/* read data from DSP Xmit */
 	data = DSP_SsiReadTxValue();
 	dmaRecord.handshakeMode_Frame = 0;
-		
+
 	Crossbar_SendDataToDmaRecord(data);
 }
 
@@ -1684,7 +1743,7 @@ void Crossbar_DmaRecordInHandShakeMode_Frame(Uint32 frame)
 /*----------------------------------------------------------------------*/
 
 /**
- * Get datas recorded by the microphone and convert them into falcon internal frequency
+ * Get data recorded by the microphone and convert them into falcon internal frequency
  *    - micro_bufferL : left track recorded by the microphone
  *    - micro_bufferR : right track recorded by the microphone
  *    - microBuffer_size : buffers size
@@ -1702,10 +1761,10 @@ void Crossbar_GetMicrophoneDatas(Sint16 *micro_bufferL, Sint16 *micro_bufferR, U
 		adc.writePosition = (adc.writePosition + 1) % DACBUFFER_SIZE;
 
 		adc.buffer_left[adc.writePosition] = micro_bufferL[bufferIndex];
-		adc.buffer_right[adc.writePosition] = micro_bufferR[bufferIndex]; 
+		adc.buffer_right[adc.writePosition] = micro_bufferR[bufferIndex];
 
 		idxPos += crossbar.frequence_ratio2;
-		bufferIndex += idxPos>>32;	
+		bufferIndex += idxPos>>32;
 		idxPos  &= 0xffffffff;			/* only keep the fractional part */
 	}
 }
@@ -1717,10 +1776,10 @@ static void Crossbar_Process_ADCXmit_Transfer(void)
 {
 	Sint16 sample;
 	Uint16 frame;
-	
+
 	/* swap from left to right channel or right to left channel */
 	adc.wordCount = 1 - adc.wordCount;
-		
+
 	/* Left Channel */
 	if (adc.wordCount == 0) {
 		sample = adc.buffer_left[adc.readPosition];
@@ -1731,12 +1790,12 @@ static void Crossbar_Process_ADCXmit_Transfer(void)
 		adc.readPosition = (adc.readPosition + 1) % DACBUFFER_SIZE;
 		frame = 0;
 	}
-	
+
 	/* Send sample to DSP receive ? */
 	if (adc.isConnectedToDsp) {
 		Crossbar_SendDataToDspReceive(sample, frame);
 	}
-	
+
 	/* Send sample to DMA record ? */
 	if (adc.isConnectedToDma) {
 		Crossbar_SendDataToDmaRecord(sample);
@@ -1762,6 +1821,10 @@ static void Crossbar_SendDataToDAC(Sint16 value, Uint16 sample_pos)
 {
 	Uint16 track = crossbar.track_monitored * 2;
 
+//fprintf ( stderr , "datadac %x %x\n" , value , dac.writePosition );
+	/* Increase counter for each sample received by the DAC */
+	dac.wordCount++;
+
 	if (sample_pos == track) {
 		/* Left channel */
 		dac.buffer_left[dac.writePosition] = value;
@@ -1774,16 +1837,19 @@ static void Crossbar_SendDataToDAC(Sint16 value, Uint16 sample_pos)
 }
 
 /**
- * Mix PSG sound with microphone sound in ADC. 
+ * Mix PSG sound with microphone sound in ADC.
  * Also mix ADC sound sample with the crossbar DAC samples.
  * (Called by sound.c)
  */
 void Crossbar_GenerateSamples(int nMixBufIdx, int nSamplesToGenerate)
 {
-	int i, j, nBufIdx;
+	int i, nBufIdx;
 	int n;
 	Sint16 adc_leftData, adc_rightData, dac_LeftData, dac_RightData;
-	
+	Sint16 dac_read_left, dac_read_right;
+
+//fprintf ( stderr , "gen %03x %03x %03x %03x\n" , dac.writePosition , dac.readPosition , (dac.writePosition-dac.readPosition)%DACBUFFER_SIZE , nSamplesToGenerate );
+
 	if (crossbar.isDacMuted) {
 		/* Output sound = 0 */
 		for (i = 0; i < nSamplesToGenerate; i++) {
@@ -1793,7 +1859,7 @@ void Crossbar_GenerateSamples(int nMixBufIdx, int nSamplesToGenerate)
 		}
 
 		/* Counters are refreshed for when DAC becomes unmuted */
-		dac.readPosition = dac.writePosition;
+		dac.readPosition = (dac.writePosition-DACBUFFER_SIZE/2)%DACBUFFER_SIZE;
 		crossbar.adc2dac_readBufferPosition = adc.writePosition;
 		return;
 	}
@@ -1828,6 +1894,17 @@ void Crossbar_GenerateSamples(int nMixBufIdx, int nSamplesToGenerate)
 		}
 
 		/* DAC mixing (direct ADC + crossbar) */
+		/* If DAC didn't receive any data, we force left/right value to 0 */
+		if ( dac.wordCount == 0 )			/* Nothing received */
+		{
+			dac_read_left = 0;
+			dac_read_right = 0;
+		}
+		else
+		{
+			dac_read_left = dac.buffer_left[dac.readPosition];
+			dac_read_right = dac.buffer_right[dac.readPosition];
+		}
 		switch (crossbar.codecInputSource) {
 			case 0:
 			default: /* Just here to remove compiler's warnings */
@@ -1842,25 +1919,26 @@ void Crossbar_GenerateSamples(int nMixBufIdx, int nSamplesToGenerate)
 				break;
 			case 2:
 				/* Crossbar->DAC sound only */
-				dac_LeftData = dac.buffer_left[dac.readPosition];
-				dac_RightData = dac.buffer_right[dac.readPosition];
+				dac_LeftData = dac_read_left;
+				dac_RightData = dac_read_right;
 				break;
 			case 3:
 				/* Mixing Direct ADC sound with Crossbar->DMA sound */
 				dac_LeftData = ((adc_leftData * crossbar.gainSettingLeft) >> 14) +
-						dac.buffer_left[dac.readPosition];
-				dac_RightData = ((adc_rightData  * crossbar.gainSettingRight) >> 14) +
-						dac.buffer_right[dac.readPosition];
+						dac_read_left;
+				dac_RightData = ((adc_rightData * crossbar.gainSettingRight) >> 14) +
+						dac_read_right;
 				break;
 		}
-			
+
 		MixBuffer[nBufIdx][0] = (dac_LeftData * crossbar.attenuationSettingLeft) >> 16;
 		MixBuffer[nBufIdx][1] = (dac_RightData * crossbar.attenuationSettingRight) >> 16;
 
-		/* Upgrade dac's buffer read pointer */ 
+		/* Upgrade dac's buffer read pointer */
 		dac.readPosition_float += crossbar.frequence_ratio;
 		n = dac.readPosition_float >> 32;				/* number of samples to skip */
 
+#if 0
 		if (n) {
 			// It becomes safe to zero old data if tail has moved
 			for (j=0; j<n; j++) {
@@ -1868,139 +1946,107 @@ void Crossbar_GenerateSamples(int nMixBufIdx, int nSamplesToGenerate)
 				dac.buffer_right[(dac.readPosition+j) % DACBUFFER_SIZE] = 0;
 			}
 		}
+#endif
 
 		dac.readPosition = (dac.readPosition + n) % DACBUFFER_SIZE;
 		dac.readPosition_float &= 0xffffffff;			/* only keep the fractional part */
-		
-		/* Upgrade adc->dac's buffer read pointer */ 
+
+		/* Upgrade adc->dac's buffer read pointer */
 		crossbar.adc2dac_readBufferPosition_float += crossbar.frequence_ratio;
 		n = crossbar.adc2dac_readBufferPosition_float >> 32;				/* number of samples to skip */
 		crossbar.adc2dac_readBufferPosition = (crossbar.adc2dac_readBufferPosition + n) % DACBUFFER_SIZE;
 		crossbar.adc2dac_readBufferPosition_float &= 0xffffffff;			/* only keep the fractional part */
 	}
+
+	/* If the DAC didn't receive any data since last call to Crossbar_GenerateSamples() */
+	/* then we need to adjust dac.writePosition to be always ahead of dac.readPosition */
+	if ( dac.wordCount == 0 )
+	{
+//		fprintf ( stderr , "fix writepos %x (readpos %x)\n" , (dac.readPosition+DACBUFFER_SIZE/2)%DACBUFFER_SIZE , dac.readPosition );
+		dac.writePosition = (dac.readPosition+DACBUFFER_SIZE/2)%DACBUFFER_SIZE;
+	}
+	dac.wordCount = 0;
 }
 
 
 /**
  * display the Crossbar registers values (for debugger info command)
  */
-void Crossbar_Info(Uint32 dummy)
+void Crossbar_Info(FILE *fp, Uint32 dummy)
 {
-	char matrixDMA[5], matrixDAC[5], matrixDSP[5], matrixEXT[5];
+	const char *matrixDMA, *matrixDSP, *matrixEXT, *matrixDAC;
 	char frqDMA[11], frqDAC[11], frqDSP[11], frqEXT[11];
 	char frqSTE[30], frq25Mhz[30], frq32Mhz[30];
 	char dataSize[15];
-	
-	static const Uint32 Ste_SampleRates[4] = {
-		6258, 12517, 25033, 50066
+	static const char *matrix_tab[8] = {
+		"OOHO",
+		"OOXO",
+		"OHOO",
+		"OXOO",
+		"HOOO",
+		"XOOO",
+		"OOOH",
+		"OOOX"
 	};
 
-	static const Uint32 Falcon_SampleRates_25Mhz[15] = {
-		49170, 32780, 24585, 19668, 16390, 14049, 12292, 10927, 9834, 8940, 8195, 7565, 7024, 6556, 6146
-	};
-
-	static const Uint32 Falcon_SampleRates_32Mhz[15] = {
-		62500, 41666, 31250, 25000, 20833, 17857, 15624, 13889, 12500, 11363, 10416, 9615, 8928, 8333, 7812
-	};
-
-	if (ConfigureParams.System.nMachineType != MACHINE_FALCON) {
-		fprintf(stderr, "Not Falcon - no Crossbar!\n");
+	if (!Config_IsMachineFalcon()) {
+		fprintf(fp, "Not Falcon - no Crossbar!\n");
 		return;
 	}
+	DmaSnd_Info(fp, 0);
+	fprintf(fp, "\n");
+	fprintf(fp, "$FF8930.w : DMA Crossbar Input Select Controller  : %04x\n", IoMem_ReadWord(0xff8930));
+	fprintf(fp, "$FF8932.w : DMA Crossbar Output Select Controller : %04x\n", IoMem_ReadWord(0xff8932));
+	fprintf(fp, "\n");
+	fprintf(fp, "$FF8934.b : External Sync Frequency Divider       : %02x\n", IoMem_ReadByte(0xff8934));
+	fprintf(fp, "$FF8935.b : Internal Sync Frequency Divider       : %02x\n", IoMem_ReadByte(0xff8935));
+	fprintf(fp, "$FF8936.b : Record Track select                   : %02x\n", IoMem_ReadByte(0xff8936));
+	fprintf(fp, "$FF8937.b : Codec Input Source                    : %02x\n", IoMem_ReadByte(0xff8937));
+	fprintf(fp, "$FF8938.b : Codec ADC Input                       : %02x\n", IoMem_ReadByte(0xff8938));
+	fprintf(fp, "$FF8939.b : Gain Settings Per Channel             : %02x\n", IoMem_ReadByte(0xff8939));
+	fprintf(fp, "$FF893A.b : Attenuation Settings Per Channel      : %02x\n", IoMem_ReadByte(0xff893a));
+	fprintf(fp, "$FF893C.w : Codec Status                          : %04x\n", IoMem_ReadWord(0xff893c));
+	fprintf(fp, "$FF8940.w : GPIO Data Direction                   : %04x\n", IoMem_ReadWord(0xff8940));
+	fprintf(fp, "$FF8942.w : GPIO Data                             : %04x\n", IoMem_ReadWord(0xff8942));
+	fprintf(fp, "\n");
 
-	fprintf(stderr, "$FF8900.b : Sound DMA control                     : %02x\n", IoMem_ReadByte(0xff8900));
-	fprintf(stderr, "$FF8901.b : Sound DMA control                     : %02x\n", IoMem_ReadByte(0xff8901));
-	fprintf(stderr, "$FF8903.b : Frame Start High                      : %02x\n", IoMem_ReadByte(0xff8903));
-	fprintf(stderr, "$FF8905.b : Frame Start middle                    : %02x\n", IoMem_ReadByte(0xff8905));
-	fprintf(stderr, "$FF8907.b : Frame Start low                       : %02x\n", IoMem_ReadByte(0xff8907));
-	fprintf(stderr, "$FF8909.b : Frame Count High                      : %02x\n", IoMem_ReadByte(0xff8909));
-	fprintf(stderr, "$FF890B.b : Frame Count middle                    : %02x\n", IoMem_ReadByte(0xff890b));
-	fprintf(stderr, "$FF890D.b : Frame Count low                       : %02x\n", IoMem_ReadByte(0xff890d));
-	fprintf(stderr, "$FF890F.b : Frame End High                        : %02x\n", IoMem_ReadByte(0xff890f));
-	fprintf(stderr, "$FF8911.b : Frame End middle                      : %02x\n", IoMem_ReadByte(0xff8911));
-	fprintf(stderr, "$FF8913.b : Frame End low                         : %02x\n", IoMem_ReadByte(0xff8913));
-	fprintf(stderr, "\n");
-	fprintf(stderr, "$FF8920.b : Sound Mode Control                    : %02x\n", IoMem_ReadByte(0xff8920));
-	fprintf(stderr, "$FF8921.b : Sound Mode Control                    : %02x\n", IoMem_ReadByte(0xff8921));
-	fprintf(stderr, "$FF8930.w : DMA Crossbar Input Select Controller  : %04x\n", IoMem_ReadWord(0xff8930));
-	fprintf(stderr, "$FF8932.w : DMA Crossbar Output Select Controller : %04x\n", IoMem_ReadWord(0xff8932));
-	fprintf(stderr, "\n");
-	fprintf(stderr, "$FF8934.b : External Sync Frequency Divider       : %02x\n", IoMem_ReadByte(0xff8934));
-	fprintf(stderr, "$FF8935.b : Internal Sync Frequency Divider       : %02x\n", IoMem_ReadByte(0xff8935));
-	fprintf(stderr, "$FF8936.b : Record Track select                   : %02x\n", IoMem_ReadByte(0xff8936));
-	fprintf(stderr, "$FF8937.b : Codec Input Source                    : %02x\n", IoMem_ReadByte(0xff8937));
-	fprintf(stderr, "$FF8938.b : Codec ADC Input                       : %02x\n", IoMem_ReadByte(0xff8938));
-	fprintf(stderr, "$FF8939.b : Gain Settings Per Channel             : %02x\n", IoMem_ReadByte(0xff8939));
-	fprintf(stderr, "$FF893A.b : Attenuation Settings Per Channel      : %02x\n", IoMem_ReadByte(0xff893a));
-	fprintf(stderr, "$FF893C.w : Codec Status                          : %04x\n", IoMem_ReadWord(0xff893c));
-	fprintf(stderr, "$FF8940.w : GPIO Data Direction                   : %04x\n", IoMem_ReadWord(0xff8940));
-	fprintf(stderr, "$FF8942.w : GPIO Data                             : %04x\n", IoMem_ReadWord(0xff8942));
-	fprintf(stderr, "\n");
-	
-	/* DAC connexion */
+	/* DAC connection */
 	switch ((IoMem_ReadWord(0xff8932) >> 13) & 0x3) {
-		case 0 : 
-			/* DAC connexion with DMA Playback */
+		case 0 :
+			/* DAC connection with DMA Playback */
 			if ((IoMem_ReadWord(0xff8930) & 0x1) == 1)
-				strcpy(matrixDAC, "OOXO");
+				matrixDAC = "OOXO";
 			else
-				strcpy(matrixDAC, "OOHO");
+				matrixDAC = "OOHO";
 			break;
 		case 1 :
-			/* DAC connexion with DSP Transmit */
+			/* DAC connection with DSP Transmit */
 			if ((IoMem_ReadWord(0xff8930) & 0x10) == 0x10)
-				strcpy(matrixDAC, "OXOO");
+				matrixDAC = "OXOO";
 			else
-				strcpy(matrixDAC, "OHOO");
+				matrixDAC = "OHOO";
 			break;
 		case 2 :
-			/* DAC connexion with External Input */
+			/* DAC connection with External Input */
 			if ((IoMem_ReadWord(0xff8930) & 0x100) == 0x100)
-				strcpy(matrixDAC, "XOOO");
+				matrixDAC = "XOOO";
 			else
-				strcpy(matrixDAC, "HOOO");
+				matrixDAC = "HOOO";
 			break;
-		case 3 : 
-			/* DAC connexion with ADC */
-			strcpy(matrixDAC, "OOOX");
+		default: /* case 3 */
+			/* DAC connection with ADC */
+			matrixDAC = "OOOX";
 			break;
 	}
 
-	/* DMA connexion */
-	switch (IoMem_ReadWord(0xff8932) & 0x7) {
-		case 0 : strcpy(matrixDMA, "OOHO"); break;
-		case 1 : strcpy(matrixDMA, "OOXO"); break;
-		case 2 : strcpy(matrixDMA, "OHOO"); break;
-		case 3 : strcpy(matrixDMA, "OXOO"); break;
-		case 4 : strcpy(matrixDMA, "HOOO"); break;
-		case 5 : strcpy(matrixDMA, "XOOO"); break;
-		case 6 : strcpy(matrixDMA, "OOOH"); break;
-		case 7 : strcpy(matrixDMA, "OOOX"); break;
-	}
+	/* DMA connection */
+	matrixDMA = matrix_tab[IoMem_ReadWord(0xff8932) & 0x7];
 
-	/* DSP connexion */
-	switch ((IoMem_ReadWord(0xff8932) >> 4) & 0x7) {
-		case 0 : strcpy(matrixDSP, "OOHO"); break;
-		case 1 : strcpy(matrixDSP, "OOXO"); break;
-		case 2 : strcpy(matrixDSP, "OHOO"); break;
-		case 3 : strcpy(matrixDSP, "OXOO"); break;
-		case 4 : strcpy(matrixDSP, "HOOO"); break;
-		case 5 : strcpy(matrixDSP, "XOOO"); break;
-		case 6 : strcpy(matrixDSP, "OOOH"); break;
-		case 7 : strcpy(matrixDSP, "OOOX"); break;
-	}
+	/* DSP connection */
+	matrixDSP = matrix_tab[(IoMem_ReadWord(0xff8932) >> 4) & 0x7];
 
-	/* External input connexion */
-	switch ((IoMem_ReadWord(0xff8932) >> 8) & 0x7) {
-		case 0 : strcpy(matrixEXT, "OOHO"); break;
-		case 1 : strcpy(matrixEXT, "OOXO"); break;
-		case 2 : strcpy(matrixEXT, "OHOO"); break;
-		case 3 : strcpy(matrixEXT, "OXOO"); break;
-		case 4 : strcpy(matrixEXT, "HOOO"); break;
-		case 5 : strcpy(matrixEXT, "XOOO"); break;
-		case 6 : strcpy(matrixEXT, "OOOH"); break;
-		case 7 : strcpy(matrixEXT, "OOOX"); break;
-	}
+	/* External input connection */
+	matrixEXT = matrix_tab[(IoMem_ReadWord(0xff8932) >> 8) & 0x7];
 
 	if ((IoMem_ReadByte(0xff8935) & 0xf) == 0) {
 		strcpy(frqDSP, "(STe Freq)");
@@ -2058,21 +2104,21 @@ void Crossbar_Info(Uint32 dummy)
 	}
 
 	/* Display the crossbar Matrix */
-	fprintf(stderr, "           INPUT\n");
-	fprintf(stderr, "External Imp  ---%c------%c------%c------%c\n", matrixDAC[0], matrixDMA[0], matrixDSP[0], matrixEXT[0]);
-	fprintf(stderr, "%s       |      |      |      |    O = no connexion\n", frqEXT);
-	fprintf(stderr, "                 |      |      |      |    X = connexion\n");
-	fprintf(stderr, "Dsp Transmit  ---%c------%c------%c------%c    H = Handshake connexion\n", matrixDAC[1], matrixDMA[1], matrixDSP[1], matrixEXT[1]);
-	fprintf(stderr, "%s       |      |      |      |\n", frqDSP);
-	fprintf(stderr, "                 |      |      |      |    %s\n", dataSize);
-	fprintf(stderr, "DMA PlayBack  ---%c------%c------%c------%c\n", matrixDAC[2], matrixDMA[2], matrixDSP[2], matrixEXT[2]);
-	fprintf(stderr, "%s       |      |      |      |    Sound Freq :\n", frqDMA);
-	fprintf(stderr, "                 |      |      |      |      %s\n", frqSTE);
-	fprintf(stderr, "ADC           ---%c------%c------%c------%c      %s\n", matrixDAC[3], matrixDMA[3], matrixDSP[3], matrixEXT[3], frq25Mhz);
-	fprintf(stderr, "%s       |      |      |      |      %s\n", frqDAC, frq32Mhz);
-	fprintf(stderr, "                 |      |      |      |\n");
-	fprintf(stderr, "                DAC    DMA    DSP   External     OUTPUT\n");
-	fprintf(stderr, "                     Record  Record   Out\n");
-	fprintf(stderr, "\n");
+	fprintf(fp, "           INPUT\n");
+	fprintf(fp, "External Imp  ---%c------%c------%c------%c\n", matrixDAC[0], matrixDMA[0], matrixDSP[0], matrixEXT[0]);
+	fprintf(fp, "%s       |      |      |      |    O = no connection\n", frqEXT);
+	fprintf(fp, "                 |      |      |      |    X = connection\n");
+	fprintf(fp, "Dsp Transmit  ---%c------%c------%c------%c    H = Handshake connection\n", matrixDAC[1], matrixDMA[1], matrixDSP[1], matrixEXT[1]);
+	fprintf(fp, "%s       |      |      |      |\n", frqDSP);
+	fprintf(fp, "                 |      |      |      |    %s\n", dataSize);
+	fprintf(fp, "DMA PlayBack  ---%c------%c------%c------%c\n", matrixDAC[2], matrixDMA[2], matrixDSP[2], matrixEXT[2]);
+	fprintf(fp, "%s       |      |      |      |    Sound Freq :\n", frqDMA);
+	fprintf(fp, "                 |      |      |      |      %s\n", frqSTE);
+	fprintf(fp, "ADC           ---%c------%c------%c------%c      %s\n", matrixDAC[3], matrixDMA[3], matrixDSP[3], matrixEXT[3], frq25Mhz);
+	fprintf(fp, "%s       |      |      |      |      %s\n", frqDAC, frq32Mhz);
+	fprintf(fp, "                 |      |      |      |\n");
+	fprintf(fp, "                DAC    DMA    DSP   External     OUTPUT\n");
+	fprintf(fp, "                     Record  Record   Out\n");
+	fprintf(fp, "\n");
 }
 

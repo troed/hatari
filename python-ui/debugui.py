@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 #
-# A Debug UI for the Hatari, part of PyGtk Hatari UI
+# A Debug UI for the Hatari, part of Python Gtk Hatari UI
 #
-# Copyright (C) 2008-2011 by Eero Tamminen
+# Copyright (C) 2008-2019 by Eero Tamminen
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,11 +15,12 @@
 # GNU General Public License for more details.
 
 import os
-# use correct version of pygtk/gtk
-import pygtk
-pygtk.require('2.0')
-import gtk
-import pango
+import gi
+# use correct version of gtk
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+from gi.repository import Gdk
+from gi.repository import Pango
 
 from config import ConfigStore
 from uihelpers import UInfo, create_button, create_toggle, \
@@ -29,7 +30,7 @@ from dialogs import TodoDialog, ErrorDialog, AskDialog, KillDialog
 
 
 def dialog_apply_cb(widget, dialog):
-    dialog.response(gtk.RESPONSE_APPLY)
+    dialog.response(Gtk.ResponseType.APPLY)
 
 
 # -------------
@@ -39,12 +40,12 @@ class SaveDialog:
     def __init__(self, parent):
         table, self.dialog = create_table_dialog(parent, "Save from memory", 3, 2)
         self.file = FselEntry(self.dialog)
-        table_add_widget_row(table, 0, "File name:", self.file.get_container())
-        self.address = table_add_entry_row(table, 1, "Save address:", 6)
+        table_add_widget_row(table, 0, 0, "File name:", self.file.get_container())
+        self.address = table_add_entry_row(table, 1, 0, "Save address:", 6)
         self.address.connect("activate", dialog_apply_cb, self.dialog)
-        self.length = table_add_entry_row(table, 2, "Number of bytes:", 6)
+        self.length = table_add_entry_row(table, 2, 0, "Number of bytes:", 6)
         self.length.connect("activate", dialog_apply_cb, self.dialog)
-    
+
     def run(self, address):
         "run(address) -> (filename,address,length), all as strings"
         if address:
@@ -53,7 +54,7 @@ class SaveDialog:
         filename = length = None
         while 1:
             response = self.dialog.run()
-            if response == gtk.RESPONSE_APPLY:
+            if response == Gtk.ResponseType.APPLY:
                 filename = self.file.get_filename()
                 address_txt = self.address.get_text()
                 length_txt = self.length.get_text()
@@ -83,12 +84,12 @@ class SaveDialog:
 
 class LoadDialog:
     def __init__(self, parent):
-        chooser = gtk.FileChooserButton('Select a File')
+        chooser = Gtk.FileChooserButton('Select a File')
         chooser.set_local_only(True)  # Hatari cannot access URIs
         chooser.set_width_chars(12)
         table, self.dialog = create_table_dialog(parent, "Load to memory", 2, 2)
-        self.file = table_add_widget_row(table, 0, "File name:", chooser)
-        self.address = table_add_entry_row(table, 1, "Load address:", 6)
+        self.file = table_add_widget_row(table, 0, 0, "File name:", chooser)
+        self.address = table_add_entry_row(table, 1, 0, "Load address:", 6)
         self.address.connect("activate", dialog_apply_cb, self.dialog)
 
     def run(self, address):
@@ -99,7 +100,7 @@ class LoadDialog:
         filename = None
         while 1:
             response = self.dialog.run()
-            if response == gtk.RESPONSE_APPLY:
+            if response == Gtk.ResponseType.APPLY:
                 filename = self.file.get_filename()
                 address_txt = self.address.get_text()
                 if filename and address_txt:
@@ -119,19 +120,19 @@ class LoadDialog:
 
 class OptionsDialog:
     def __init__(self, parent):
-        self.dialog = gtk.Dialog("Debugger UI options", parent,
-            gtk.DIALOG_MODAL | gtk.DIALOG_DESTROY_WITH_PARENT,
-            (gtk.STOCK_APPLY,  gtk.RESPONSE_APPLY,
-             gtk.STOCK_CLOSE, gtk.RESPONSE_CLOSE))
+        self.dialog = Gtk.Dialog("Debugger UI options", parent,
+            Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+            (Gtk.STOCK_APPLY,  Gtk.ResponseType.APPLY,
+             Gtk.STOCK_CLOSE, Gtk.ResponseType.CLOSE))
 
-        self.lines = gtk.Adjustment(0, 5, 50)
-        scale = gtk.HScale(self.lines)
+        self.lines = Gtk.Adjustment(0, 5, 50)
+        scale = Gtk.HScale(adjustment=self.lines)
         scale.set_digits(0)
-        
-        self.follow_pc = gtk.CheckButton("On stop, set address to PC")
+
+        self.follow_pc = Gtk.CheckButton("On stop, set address to PC")
 
         vbox = self.dialog.vbox
-        vbox.add(gtk.Label("Memdump/disasm lines:"))
+        vbox.add(Gtk.Label(label="Memdump/disasm lines:"))
         vbox.add(scale)
         vbox.add(self.follow_pc)
         vbox.show_all()
@@ -142,7 +143,7 @@ class OptionsDialog:
         self.lines.set_value(lines)
         self.dialog.show_all()
         response = self.dialog.run()
-        if response == gtk.RESPONSE_APPLY:
+        if response == Gtk.ResponseType.APPLY:
             lines = int(self.lines.get_value())
             follow_pc = self.follow_pc.get_active()
         self.dialog.hide()
@@ -184,7 +185,7 @@ class MemoryAddress:
         self.first = None
         self.second = None
         self.last = None
-        
+
     def clear(self):
         if self.follow_pc:
             # get first address from PC when next stopped
@@ -193,11 +194,10 @@ class MemoryAddress:
         self.last  = None
 
     def create_widgets(self):
-        entry = gtk.Entry(6)
-        entry.set_width_chars(6)
+        entry = Gtk.Entry(max_length=6, width_chars=6)
         entry.connect("activate", self._entry_cb)
-        memory = gtk.Label()
-        mono = pango.FontDescription("monospace")
+        memory = Gtk.Label(halign=Gtk.Align.START, margin_start=8, margin_end=8, margin_top=8)
+        mono = Pango.FontDescription("monospace")
         memory.modify_font(mono)
         entry.modify_font(mono)
         return (entry, memory)
@@ -212,32 +212,32 @@ class MemoryAddress:
 
     def reset_entry(self):
         self.entry.set_text("%06X" % self.first)
-        
+
     def get(self):
         return self.first
 
     def get_memory_label(self):
         return self.memory
-    
+
     def get_address_entry(self):
         return self.entry
 
     def get_follow_pc(self):
         return self.follow_pc
-    
+
     def set_follow_pc(self, follow_pc):
         self.follow_pc = follow_pc
 
     def get_lines(self):
         return self.lines
-    
+
     def set_lines(self, lines):
         self.lines = lines
-    
+
     def set_dumpmode(self, mode):
         self.dumpmode = mode
         self.dump()
-        
+
     def dump(self, address = None, move_idx = 0):
         if self.dumpmode == Constants.REGISTERS:
             output = self._get_registers()
@@ -252,7 +252,7 @@ class MemoryAddress:
         if not address:
             print("ERROR: address needed")
             return
-        
+
         if self.dumpmode == Constants.MEMDUMP:
             output = self._get_memdump(address, move_idx)
         elif self.dumpmode == Constants.DISASM:
@@ -263,14 +263,22 @@ class MemoryAddress:
         self.memory.set_label("".join(output))
         if move_idx:
             self.reset_entry()
-    
+
     def _get_registers(self):
         self.hatari.debug_command("r")
         output = self.hatari.get_lines(self.debug_output)
         if not self.first:
-            # second last line has first PC, last line next PC in next column
-            self.first  = int(output[-2][:output[-2].find(":")], 16)
+            # 2nd last line has first PC in 1st column, last line next PC in 2nd column
             self.second = int(output[-1][output[-1].find(":")+2:], 16)
+            # OldUAE CPU core has ':' in both
+            offset = output[-2].find(":")
+            if offset < 0:
+                # WinUAE CPU core only in one
+                offset = output[-2].find(" ")
+            if offset < 0:
+                print("ERROR: unable to parse register dump line:\n\t'%s'", output[-2])
+                return output
+            self.first = int(output[-2][:offset], 16)
             self.reset_entry()
         return output
 
@@ -290,7 +298,7 @@ class MemoryAddress:
         output = self.hatari.get_lines(self.debug_output)
         self.second = address + linewidth
         return output
-        
+
     def _get_disasm(self, address, move_idx):
         # TODO: uses brute force i.e. ask for more lines that user has
         # requested to be sure that the window is filled, assuming
@@ -345,7 +353,7 @@ class MemoryAddress:
 
 # the Hatari debugger UI class and methods
 class HatariDebugUI:
-    
+
     def __init__(self, hatariobj, do_destroy = False):
         self.address = MemoryAddress(hatariobj)
         self.hatari = hatariobj
@@ -361,31 +369,28 @@ class HatariDebugUI:
         self.load_options()
         # UI initialization/creation
         self.window = self.create_ui("Hatari Debug UI", do_destroy)
-        
+
     def create_ui(self, title, do_destroy):
         # buttons at top
-        hbox1 = gtk.HBox()
+        hbox1 = Gtk.HBox()
         self.create_top_buttons(hbox1)
 
         # disasm/memory dump at the middle
-        align = gtk.Alignment()
-        # top, bottom, left, right padding
-        align.set_padding(8, 0, 8, 8)
-        align.add(self.address.get_memory_label())
+        addr = self.address.get_memory_label()
 
         # buttons at bottom
-        hbox2 = gtk.HBox()
+        hbox2 = Gtk.HBox()
         self.create_bottom_buttons(hbox2)
 
         # their container
-        vbox = gtk.VBox()
-        vbox.pack_start(hbox1, False)
-        vbox.pack_start(align, True, True)
-        vbox.pack_start(hbox2, False)
-        
+        vbox = Gtk.VBox()
+        vbox.pack_start(hbox1, False, True, 0)
+        vbox.pack_start(addr, True, True, 0)
+        vbox.pack_start(hbox2, False, True, 0)
+
         # and the window for all of this
-        window = gtk.Window(gtk.WINDOW_TOPLEVEL)
-        window.set_events(gtk.gdk.KEY_RELEASE_MASK)
+        window = Gtk.Window(Gtk.WindowType.TOPLEVEL)
+        window.set_events(Gdk.EventMask.KEY_RELEASE_MASK)
         window.connect("key_release_event", self.key_event_cb)
         if do_destroy:
             window.connect("delete_event", self.quit)
@@ -395,14 +400,14 @@ class HatariDebugUI:
         window.set_title(title)
         window.add(vbox)
         return window
-    
+
     def create_top_buttons(self, box):
         self.stop_button = create_toggle("Stop", self.stop_cb)
         box.add(self.stop_button)
 
         monitor = create_button("Monitor...", self.monitor_cb)
         box.add(monitor)
-        
+
         buttons = (
             ("<<<", "Page_Up",  -Constants.MOVE_MAX),
             ("<<",  "Up",       -Constants.MOVE_MED),
@@ -414,13 +419,13 @@ class HatariDebugUI:
         self.keys = {}
         for label, keyname, offset in buttons:
             button = create_button(label, self.set_address_offset, offset)
-            keyval = gtk.gdk.keyval_from_name(keyname)
+            keyval = Gdk.keyval_from_name(keyname)
             self.keys[keyval] =  offset
             box.add(button)
 
         # to middle of <<>> buttons
         address_entry = self.address.get_address_entry()
-        box.pack_start(address_entry, False)
+        box.pack_start(address_entry, False, True, 0)
         box.reorder_child(address_entry, 5)
 
     def create_bottom_buttons(self, box):
@@ -431,11 +436,10 @@ class HatariDebugUI:
         )
         group = None
         for label, mode in radios:
-            button = gtk.RadioButton(group, label)
+            button = Gtk.RadioButton(label=label, group=group, can_focus=False)
             if not group:
                 group = button
             button.connect("toggled", self.dumpmode_cb, mode)
-            button.unset_flags(gtk.CAN_FOCUS)
             box.add(button)
         group.set_active(True)
 
@@ -466,7 +470,7 @@ class HatariDebugUI:
 
     def set_address_offset(self, widget, move_idx):
         self.address.dump(None, move_idx)
-    
+
     def monitor_cb(self, widget):
         TodoDialog(self.window).run("add register / memory address range monitor window.")
 
@@ -483,7 +487,7 @@ class HatariDebugUI:
         (filename, address, length) = self.dialog_save.run(self.address.get())
         if filename and address and length:
             self.hatari.debug_command("s %s $%06x $%06x" % (filename, address, length))
-        
+
     def options_cb(self, widget):
         if not self.dialog_options:
             self.dialog_options = OptionsDialog(self.window)
@@ -519,10 +523,10 @@ class HatariDebugUI:
         except (KeyError, AttributeError):
             ErrorDialog(None).run("Debug UI configuration mismatch!\nTry again after removing: '%s'." % configpath)
         self.config = config
-    
+
     def save_options(self):
         self.config.save()
-    
+
     def show(self):
         self.stop_button.set_active(True)
         self.window.show_all()
@@ -536,7 +540,7 @@ class HatariDebugUI:
 
     def quit(self, widget, arg):
         KillDialog(self.window).run(self.hatari)
-        gtk.main_quit()
+        Gtk.main_quit()
 
 
 def main():
@@ -555,9 +559,9 @@ def main():
     info = UInfo()
     debugui = HatariDebugUI(hatariobj, True)
     debugui.window.show_all()
-    gtk.main()
+    Gtk.main()
     debugui.save_options()
 
-    
+
 if __name__ == "__main__":
     main()

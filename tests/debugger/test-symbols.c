@@ -30,29 +30,31 @@ int main(int argc, const char *argv[])
 		0x28,
 	};
 
-#define DO_CMD(cmd) Symbols_Command(ARRAYSIZE(cmd), cmd)
+#define DO_CMD(cmd) Symbols_Command(ARRAY_SIZE(cmd), cmd)
 	char symbols[] = "symbols";
 	char fname[] = "data/os-header.sym";
 	char sname[] = "name";
-	char saddr[] = "addr";
+	char scode[] = "code";
+	char sdata[] = "data";
 	char sfree[] = "free";
 	char *cmd_load[] = { symbols, fname };
 	char *cmd_free[] = { symbols, sfree };
 	char *cmd_show_byname[] = { symbols, sname };
-	char *cmd_show_byaddr[] = { symbols, saddr };
+	char *cmd_show_bycode[] = { symbols, scode };
+	char *cmd_show_bydata[] = { symbols, sdata };
 
 	int i, tests = 0, errors = 0;
 	const char *name;
 	Uint32 addr;
 
 	DO_CMD(cmd_load);
-	DO_CMD(cmd_show_byaddr);
-	fprintf(stderr, "\n");
+	DO_CMD(cmd_show_bycode);
+	DO_CMD(cmd_show_bydata);
 	DO_CMD(cmd_show_byname);
 	DO_CMD(cmd_load);	/* free + reload */
 
 	fprintf(stderr, "\nStuff that should FAIL:\n");
-	for (i = 0; i < ARRAYSIZE(fail_name); i++) {
+	for (i = 0; i < ARRAY_SIZE(fail_name); i++) {
 		name = fail_name[i];
 		if (Symbols_GetCpuAddress(SYMTYPE_ALL, name, &addr)) {
 			fprintf(stderr, "*** Unexpected SUCCESS from '%s' (0x%08x) ***\n", name, addr);
@@ -62,9 +64,9 @@ int main(int argc, const char *argv[])
 		}
 	}
 	tests += i;
-	for (i = 0; i < ARRAYSIZE(fail_addr); i++) {
+	for (i = 0; i < ARRAY_SIZE(fail_addr); i++) {
 		addr = fail_addr[i];
-		name = Symbols_GetByCpuAddress(addr);
+		name = Symbols_GetByCpuAddress(addr, SYMTYPE_ALL);
 		if (name) {
 			fprintf(stderr, "*** Unexpected SUCCESS from 0x%08x (%s) ***\n", addr, name);
 			errors++;
@@ -75,7 +77,7 @@ int main(int argc, const char *argv[])
 	tests += i;
 
 	fprintf(stderr, "\nStuff that should SUCCEED:\n");
-	for (i = 0; i < ARRAYSIZE(success_name); i++) {
+	for (i = 0; i < ARRAY_SIZE(success_name); i++) {
 		name = success_name[i];
 		if (Symbols_GetCpuAddress(SYMTYPE_ALL, name, &addr)) {
 			fprintf(stderr, "- '%s'\n", name);
@@ -85,9 +87,9 @@ int main(int argc, const char *argv[])
 		}
 	}
 	tests += i;
-	for (i = 0; i < ARRAYSIZE(success_addr); i++) {
+	for (i = 0; i < ARRAY_SIZE(success_addr); i++) {
 		addr = success_addr[i];
-		name = Symbols_GetByCpuAddress(addr);
+		name = Symbols_GetByCpuAddress(addr, SYMTYPE_ALL);
 		if (name) {
 			fprintf(stderr, "- 0x%08x: %s\n", addr, name);
 		} else {

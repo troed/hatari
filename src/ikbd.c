@@ -9,14 +9,14 @@
   The IKBD has a small ROM which is used to process various commands send
   by the main CPU to the THE IKBD.
   Due to lack of real HD6301 emulation, those commands are handled by
-  functionnaly equivalent code that tries to be as close as possible
+  functionally equivalent code that tries to be as close as possible
   to a real HD6301.
 
   For program using their own HD6301 code, we also use some custom
   handlers to emulate the expected result.
 */
 
-const char IKBD_fileid[] = "Hatari ikbd.c : " __DATE__ " " __TIME__;
+const char IKBD_fileid[] = "Hatari ikbd.c";
 
 /* 2007/09/29	[NP]	Use the new int.c to add interrupts with INT_CPU_CYCLE / INT_MFP_CYCLE.		*/
 /* 2007/12/09	[NP]	If reset is written to ACIA control register, we must call ACIA_Reset to reset	*/
@@ -66,10 +66,19 @@ const char IKBD_fileid[] = "Hatari ikbd.c : " __DATE__ " " __TIME__;
 /*			required for the loader of 'Just Bugging' by ACF which sends 0x11 and 0x13 just	*/
 /*			after 0x80 0x01 (temporary fix, would need to be measured on a real STF to see	*/
 /*			if it's always ignored or just during a specific delay)				*/
+/* 2015/10/10	[NP]	When IKBD_Reset / IKBD_Boot_ROM are called, we should not restart the autosend	*/
+/*			handler INTERRUPT_IKBD_AUTOSEND if it's already set, else we can loose keyboard	*/
+/*			input if IKBD_Reset is called in a loop before any event could be processed	*/
+/*			(this could happen if a program called the 'RESET' instruction in a loop, then	*/
+/*			we lost the F12 key for example)  (fix endless RESET when doing a warm reset	*/
+/*			(alt+r) during the 'Vodka Demo' by 'Equinox', only solution was to kill Hatari)	*/
+/* 2017/10/27	[TS]	Add Audio Sculpture 6301 program checksum and emulation				*/
 
 
+#include <inttypes.h>
 
 #include "main.h"
+#include "configuration.h"
 #include "ikbd.h"
 #include "cycInt.h"
 #include "ioMem.h"
@@ -81,7 +90,6 @@ const char IKBD_fileid[] = "Hatari ikbd.c : " __DATE__ " " __TIME__;
 #include "video.h"
 #include "utils.h"
 #include "acia.h"
-#include "configuration.h"
 #include "clocks_timings.h"
 
 
@@ -337,8 +345,6 @@ static void	IKBD_Send_Byte_Delay ( Uint8 Data , int Delay_Cycles );
 
 static bool	IKBD_BCD_Check ( Uint8 val );
 static Uint8	IKBD_BCD_Adjust ( Uint8 val );
-void		IKBD_UpdateClockOnVBL ( void );
-
 
 
 /*-----------------------------------------------------------------------*/
@@ -358,6 +364,10 @@ static void IKBD_CustomCodeHandler_DragonnelsMenu_Read ( void );
 static void IKBD_CustomCodeHandler_DragonnelsMenu_Write ( Uint8 aciabyte );
 static void IKBD_CustomCodeHandler_ChaosAD_Read ( void );
 static void IKBD_CustomCodeHandler_ChaosAD_Write ( Uint8 aciabyte );
+static void IKBD_CustomCodeHandler_AudioSculpture_Color_Read ( void );
+static void IKBD_CustomCodeHandler_AudioSculpture_Mono_Read ( void );
+static void IKBD_CustomCodeHandler_AudioSculpture_Read ( bool ColorMode );
+static void IKBD_CustomCodeHandler_AudioSculpture_Write ( Uint8 aciabyte );
 
 
 static int	MemoryLoadNbBytesTotal = 0;		/* total number of bytes to send with the command 0x20 */
@@ -419,6 +429,24 @@ CustomCodeDefinitions[] =
 		IKBD_CustomCodeHandler_ChaosAD_Read ,
 		IKBD_CustomCodeHandler_ChaosAD_Write ,
 		"Chaos A.D."
+	},
+	{
+		0xbc0c206d,
+		IKBD_CustomCodeHandler_CommonBoot ,
+		91 ,
+		0x119b26ed ,
+		IKBD_CustomCodeHandler_AudioSculpture_Color_Read ,
+		IKBD_CustomCodeHandler_AudioSculpture_Write ,
+		"Audio Sculpture Color"
+	},
+	{
+		0xbc0c206d ,
+		IKBD_CustomCodeHandler_CommonBoot ,
+		91 ,
+		0x63b5f4df ,
+		IKBD_CustomCodeHandler_AudioSculpture_Mono_Read ,
+		IKBD_CustomCodeHandler_AudioSculpture_Write ,
+		"Audio Sculpture Mono"
 	}
 };
 
@@ -568,9 +596,9 @@ static void	IKBD_Boot_ROM ( bool ClearAllRAM )
 
 
 	/* Remove any custom handlers used to emulate code loaded to the 6301's RAM */
-	if ( IKBD_ExeMode == true )
+	if ( ( MemoryLoadNbBytesLeft != 0 ) || ( IKBD_ExeMode == true ) )
 	{
-		LOG_TRACE ( TRACE_IKBD_ALL , "ikbd custom exe off\n" );
+		LOG_TRACE ( TRACE_IKBD_ALL , "ikbd stop memory load and turn off custom exe\n" );
 
 		MemoryLoadNbBytesLeft = 0;
 		pIKBD_CustomCodeHandler_Read = NULL;
@@ -583,12 +611,16 @@ static void	IKBD_Boot_ROM ( bool ClearAllRAM )
 	/* is stuck. We use a timer to emulate the time needed for this part */
 	/* (eg Lotus Turbo Esprit 2 requires at least a delay of 50000 cycles */
 	/* or it will crash during start up) */
-	CycInt_AddRelativeInterrupt( IKBD_RESET_CYCLES , INT_CPU_CYCLE , INTERRUPT_IKBD_RESETTIMER );
+	CycInt_AddRelativeInterrupt( IKBD_RESET_CYCLES , INT_CPU8_CYCLE , INTERRUPT_IKBD_RESETTIMER );
 
 
 	/* Add auto-update function to the queue */
+	/* We add it only if it was not active, else this can lead to unresponsive keyboard/input */
+	/* when RESET instruction is called in a loop in less than 150000 cycles */
 	Keyboard.AutoSendCycles = 150000;				/* approx every VBL */
-	CycInt_AddRelativeInterrupt ( Keyboard.AutoSendCycles, INT_CPU_CYCLE, INTERRUPT_IKBD_AUTOSEND );
+	if ( CycInt_InterruptActive ( INTERRUPT_IKBD_AUTOSEND ) == false )
+		CycInt_AddRelativeInterrupt ( Keyboard.AutoSendCycles, INT_CPU8_CYCLE, INTERRUPT_IKBD_AUTOSEND );
+
 	LOG_TRACE ( TRACE_IKBD_ALL , "ikbd reset done, starting reset timer\n" );
 }
 
@@ -1232,7 +1264,7 @@ static void IKBD_CheckForDoubleClicks(void)
 
 		Keyboard.bLButtonDown = DoubleClickPattern[Keyboard.LButtonDblClk];
 		Keyboard.LButtonDblClk++;
-		if (Keyboard.LButtonDblClk >= 13)             /* Check for end of sequence */
+		if (Keyboard.LButtonDblClk >= ARRAY_SIZE(DoubleClickPattern))
 		{
 			Keyboard.LButtonDblClk = 0;
 			Keyboard.bLButtonDown = false;
@@ -1258,7 +1290,7 @@ static void IKBD_CheckForDoubleClicks(void)
 
 		Keyboard.bRButtonDown = DoubleClickPattern[Keyboard.RButtonDblClk];
 		Keyboard.RButtonDblClk++;
-		if (Keyboard.RButtonDblClk >= 13)             /* Check for end of sequence */
+		if (Keyboard.RButtonDblClk >= ARRAY_SIZE(DoubleClickPattern))
 		{
 			Keyboard.RButtonDblClk = 0;
 			Keyboard.bRButtonDown = false;
@@ -1326,7 +1358,7 @@ static void IKBD_DuplicateMouseFireButtons(void)
 		if (KeyboardProcessor.Joy.JoyData[1]&0x80)
 		{
 			KeyboardProcessor.Joy.JoyData[1] &= 0x7f;  /* Clear fire button bit */
-			Keyboard.bRButtonDown |= BUTTON_JOYSTICK;  /* Mimick on mouse right button */
+			Keyboard.bRButtonDown |= BUTTON_JOYSTICK;  /* Mimic right mouse button */
 		}
 		else
 			Keyboard.bRButtonDown &= ~BUTTON_JOYSTICK;
@@ -1382,11 +1414,6 @@ static void IKBD_SendRelMousePacket(void)
 	}
 }
 
-#ifdef __LIBRETRO__
-//FIXME ADD MXjoy1
-extern unsigned char MXjoy0;
-extern int NUMjoy;
-#endif
 
 /**
  * Get joystick data
@@ -1394,31 +1421,14 @@ extern int NUMjoy;
 static void IKBD_GetJoystickData(void)
 {
 	/* Joystick 1 */
-	KeyboardProcessor.Joy.JoyData[1] = 
-#ifdef __LIBRETRO__
-			MXjoy0;
-#else
-			Joy_GetStickData(1);
-#endif
+	KeyboardProcessor.Joy.JoyData[1] = Joy_GetStickData(1);
 
-#ifdef __LIBRETRO__
-if(NUMjoy<0){
-#endif
 	/* If mouse is on, joystick 0 is not connected */
 	if (KeyboardProcessor.MouseMode==AUTOMODE_OFF
 	        || (bBothMouseAndJoy && KeyboardProcessor.MouseMode==AUTOMODE_MOUSEREL))
-		KeyboardProcessor.Joy.JoyData[0] = 
-#ifdef __LIBRETRO__
-			MXjoy0;
-#else
-			Joy_GetStickData(0);
-#endif
+		KeyboardProcessor.Joy.JoyData[0] = Joy_GetStickData(0);
 	else
 		KeyboardProcessor.Joy.JoyData[0] = 0x00;
-
-#ifdef __LIBRETRO__
-	}
-#endif
 }
 
 
@@ -1469,10 +1479,10 @@ static void IKBD_SendAutoJoysticksMonitoring(void)
 	Uint8 Byte2;
 
 	Byte1 = ( ( KeyboardProcessor.Joy.JoyData[0] & 0x80 ) >> 6 )
-		|| ( ( KeyboardProcessor.Joy.JoyData[1] & 0x80 ) >> 7 );
+		| ( ( KeyboardProcessor.Joy.JoyData[1] & 0x80 ) >> 7 );
 
 	Byte2 = ( ( KeyboardProcessor.Joy.JoyData[0] & 0x0f ) << 4 )
-		|| ( KeyboardProcessor.Joy.JoyData[1] & 0x0f );
+		| ( KeyboardProcessor.Joy.JoyData[1] & 0x0f );
 
 	IKBD_Cmd_Return_Byte (Byte1);
 	IKBD_Cmd_Return_Byte (Byte2);
@@ -1739,6 +1749,24 @@ void IKBD_PressSTKey(Uint8 ScanCode, bool bPress)
 
 /*-----------------------------------------------------------------------*/
 /**
+ * Check if a key is pressed in the ScanCodeState array
+ * Return the scancode >= 0 for the first key we find, else return -1
+ * if no key is pressed
+ */
+static int IKBD_CheckPressedKey(void)
+{
+	unsigned int	i;
+
+	for (i=0 ; i<sizeof(ScanCodeState) ; i++ )
+		if ( ScanCodeState[ i ] )
+			return i;
+
+	return -1;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
  * This function is called regularly to automatically send keyboard, mouse
  * and joystick updates.
  */
@@ -1765,7 +1793,7 @@ void IKBD_InterruptHandler_AutoSend(void)
 	}
 
 	/* Trigger this auto-update function again after a while */
-	CycInt_AddRelativeInterrupt(Keyboard.AutoSendCycles, INT_CPU_CYCLE, INTERRUPT_IKBD_AUTOSEND);
+	CycInt_AddRelativeInterrupt(Keyboard.AutoSendCycles, INT_CPU8_CYCLE, INTERRUPT_IKBD_AUTOSEND);
 
 	/* We don't send keyboard data automatically within the first few
 	 * VBLs to avoid that TOS gets confused during its boot time */
@@ -1807,11 +1835,13 @@ static void IKBD_CheckResetDisableBug(void)
 /*-----------------------------------------------------------------------*/
 /**
  * When a byte is received by the IKBD, it is added to a small 8 byte buffer.
- * If the first byte is a valid command, we wait for additionnal bytes if needed
- * and then we execute the command's handler.
- * If the first byte is not a valid command or after a successful command, we
- * empty the input buffer (extra bytes, if any, are lost)
- * If the input buffer is full when a new byte is received, the new byte is lost.
+ * - If the first byte is a valid command, we wait for additional bytes if needed
+ *   and then we execute the command's handler.
+ * - If the first byte is not a valid command or after a successful command, we
+ *   empty the input buffer (extra bytes, if any, are lost)
+ * - If the input buffer is full when a new byte is received, the new byte is lost.
+ * - In case the first byte read is not a valid command then IKBD does nothing
+ *   (it doesn't return any byte to indicate the command was not recognized)
  */
 static void IKBD_RunKeyboardCommand(Uint8 aciabyte)
 {
@@ -1991,8 +2021,8 @@ static void IKBD_Cmd_SetMouseThreshold(void)
  * SET MOUSE SCALE
  *
  * 0x0C
- * X      ; horizontal mouse ticks per internel X
- * Y      ; vertical mouse ticks per internel Y
+ * X      ; horizontal mouse ticks per internal X
+ * Y      ; vertical mouse ticks per internal Y
  */
 static void IKBD_Cmd_SetMouseScale(void)
 {
@@ -2242,7 +2272,7 @@ static void IKBD_Cmd_ReturnJoystick(void)
  * SET JOYSTICK MONITORING
  *
  * 0x17
- * rate      ; time between samples in hundreths of a second
+ * rate      ; time between samples in hundredths of a second
  *   Returns: (in packets of two as long as in mode)
  *     %000000xy  where y is JOYSTICK1 Fire button
  *         and x is JOYSTICK0 Fire button
@@ -2268,8 +2298,8 @@ static void IKBD_Cmd_SetJoystickMonitoring(void)
 		Rate = 1;
 
 	Cycles = 8021247 * Rate / 100;
-	Cycles <<= nCpuFreqShift;					/* Compensate for x2 or x4 cpu speed */
-	CycInt_AddRelativeInterrupt ( Cycles, INT_CPU_CYCLE, INTERRUPT_IKBD_AUTOSEND );
+	CycInt_AddRelativeInterrupt ( Cycles, INT_CPU8_CYCLE, INTERRUPT_IKBD_AUTOSEND );
+
 	Keyboard.AutoSendCycles = Cycles;
 }
 
@@ -2305,10 +2335,10 @@ static void IKBD_Cmd_SetJoystickFireDuration(void)
  *         ; until vertical cursor key is generated before RY
  *         ; has elapsed
  * VX        ; length (in tenths of seconds) of joystick closure
- *         ; until horizontal cursor keystokes are generated after RX
+ *         ; until horizontal cursor keystrokes are generated after RX
  *         ; has elapsed
  * VY        ; length (in tenths of seconds) of joystick closure
- *         ; until vertical cursor keystokes are generated after RY
+ *         ; until vertical cursor keystrokes are generated after RY
  *         ; has elapsed
  */
 static void IKBD_Cmd_SetCursorForJoystick(void)
@@ -3056,3 +3086,84 @@ static void IKBD_CustomCodeHandler_ChaosAD_Write ( Uint8 aciabyte )
 	}
 }
 
+/*----------------------------------------------------------------------*/
+/* Audio Sculpture decryption support					*/
+/* The main executable is decrypted with a key extracted from a   	*/
+/* previously uploaded program in the 6301. When the magic value 0x42 	*/
+/* is sent to fffc02 it will output the two bytes 0x4b and 0x13		*/
+/* and exit the custom handler again					*/
+/* [NP] The custom program has 2 parts :				*/
+/*  - 1st part is used during the intro and wait for key 'space' in	*/
+/*    color mode or any key in mono mode (but intro screen in mono	*/
+/*    exits automatically without testing a key !)			*/
+/*  - 2nd part wait to receive $42 from the ACIA, then send $4b and $13	*/
+/*----------------------------------------------------------------------*/
+
+static bool ASmagic = false;
+
+static void IKBD_CustomCodeHandler_AudioSculpture_Color_Read ( void )
+{
+	IKBD_CustomCodeHandler_AudioSculpture_Read ( true );
+}
+
+static void IKBD_CustomCodeHandler_AudioSculpture_Mono_Read ( void )
+{
+	IKBD_CustomCodeHandler_AudioSculpture_Read ( false );
+}
+
+static void IKBD_CustomCodeHandler_AudioSculpture_Read ( bool ColorMode )
+{
+	Uint8		res = 0;
+	static int	ReadCount = 0;
+
+	if ( ASmagic )
+	{
+		ReadCount++;
+		if ( ReadCount == 2 )			/* We're done reading out the 2 bytes, exit the custom handler */
+		{
+			IKBD_Boot_ROM ( false );
+			ASmagic = false;
+			ReadCount = 0;
+		}
+	}
+
+	else if ( ( ( ColorMode == false ) && ( IKBD_CheckPressedKey() >= 0 ) )		/* wait for any key in mono mode */
+		|| ScanCodeState[ 0x39 ] )		/* wait for 'space' key in color mode */
+	{
+		res = 0x39;				/* send scancode for 'space' */
+		IKBD_Send_Byte_Delay ( res , 0 );
+	}
+}
+
+static void IKBD_CustomCodeHandler_AudioSculpture_Write ( Uint8 aciabyte )
+{
+	Uint8		Magic = 0x42;
+	Uint8		Key[] = { 0x4b , 0x13 };
+
+	if ( aciabyte == Magic )
+	{
+		ASmagic = true;
+		IKBD_Send_Byte_Delay ( Key[0] , 0 );
+		IKBD_Send_Byte_Delay ( Key[1] , 0 );
+	}
+}
+
+
+void IKBD_Info(FILE *fp, Uint32 dummy)
+{
+	int i;
+	fprintf(fp, "Transmit/Receive Control+Status: 0x%02x\n", pIKBD->TRCSR);
+	fprintf(fp, "Rate + Mode Control:             0x%02x\n", pIKBD->RMCR);
+	fprintf(fp, "Transmit:   Receive:\n");
+	fprintf(fp, "- Data:  0x%02x  0x%02x\n", pIKBD->TDR, pIKBD->RDR);
+	fprintf(fp, "- Shift: 0x%02x  0x%02x\n", pIKBD->TSR, pIKBD->RSR);
+	fprintf(fp, "- State: %4d  %4d\n",
+		pIKBD->SCI_TX_State, pIKBD->SCI_RX_State);
+	fprintf(fp, "- #Bits: %4d  %4d\n",
+		pIKBD->SCI_TX_Size, pIKBD->SCI_RX_Size);
+	fprintf(fp, "- Delay: %4d\n", pIKBD->SCI_TX_Delay);
+	fprintf(fp, "Clock:");
+	for (i = 0; i < ARRAY_SIZE(pIKBD->Clock); i++)
+		fprintf(fp, " %02x", pIKBD->Clock[i]);
+	fprintf(fp, " (+%" PRId64 ")\n", pIKBD->Clock_micro);
+}

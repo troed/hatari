@@ -7,13 +7,12 @@ ST/STe/TT/Falcon emulator and its built-in debugger which can
 
 Having the UI in another process allows doing it with a higher level
 language while avoiding adding GUI toolkit dependencies to Hatari
-itself. The UI is done with PyGtk i.e. in Python language, using the
-Gtk widget set.
+itself. The UI is written in Python language, using Gtk widget set.
 
 The main points of this new UI over the Hatari internal one are its
 configurability, more usable file selector, internationalization
-support and providing a GUI for the (console based) debugger included
-with the Hatari emulator.
+support and providing a (very) simple GUI for the (console based)
+debugger included with the Hatari emulator.
 
 Note: this is an additional UI, the built-in Hatari SDL UI isn't being
 replaced or going anywhere!
@@ -22,12 +21,12 @@ replaced or going anywhere!
 Requirements
 ------------
 
-My guess at the required versions for the dependencies are:
-- Python >= 2.6
-- PyGtk >= 2.12   (on Debian/Ubuntu PyGtk is in python-gtk2 package)
+- Python2 >= 2.7, or python3 >= 3.5
+- python-gi (Python GObject Introspection)
+- Gtk v3 and its gir bindings (gir1.2-gtk-3.0)
 
 Hatari UI is included with the Hatari sources:
-	http://hg.tuxfamily.org/mercurialroot/hatari/hatari/file/tip/python-ui
+	https://git.tuxfamily.org/hatari/hatari.git/tree/python-ui
 
 Hatari UI has been tested on several Linux versions.  I would assume
 it to work also on other unix systems such as Apple OSX. It may work
@@ -42,7 +41,9 @@ own embedding disables all keyboard events in SDL program).
 
 Here are instructions on installing the dependencies for non-Linux
 platforms (neither tested nor supported as I don't use/have them):
-	http://pygtk.org/downloads.html
+	https://www.python.org/downloads/
+	https://pypi.org/project/PyGObject/
+	https://www.gtk.org/download/
 
 
 Running
@@ -50,7 +51,7 @@ Running
 
 Being a Python program, Hatari UI doesn't need to be built.
 You can just run it from where you extracted it (or checked
-it out of TuxFamily HG repo) by calling its wrapper script:
+it out of TuxFamily git repo) by calling its wrapper script:
 	/path/to/script/hatariui
 
 Or you can run just the debugger:
@@ -75,4 +76,4 @@ shortcuts couldn't be used with Hatari.
 
 
 A www-page with more information about Hatari UI is here:
-	http://koti.mbnet.fi/tammat/hatari/hatari-ui.shtml
+	http://eerott.mbnet.fi/hatari/hatari-ui.shtml

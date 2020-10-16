@@ -16,7 +16,7 @@
 
 #include "readcpu.h"
 #include "m68k.h"
-#include "emumemory.h"
+#include "memory.h"
 
 
 /* Possible exceptions sources for M68000_Exception() and Exception() */
@@ -117,8 +117,11 @@ extern struct regstruct
     uae_u32 pc;
     uae_u8 *pc_p;
     uae_u8 *pc_oldp;
+    uae_u16 opcode;
+    uae_u32 instruction_pc;
 
     uae_u32 vbr,sfc,dfc;
+    uae_u32 caar, cacr;
 
     fptype fp[8];
     fptype fp_result;
@@ -162,6 +165,8 @@ STATIC_INLINE uaecptr m68k_getpc_p (uae_u8 *p)
     return regs.pc + ((char *)p - (char *)regs.pc_oldp);
 }
 
+#define M68K_GETPC m68k_getpc()
+
 #define get_ibyte(o) do_get_mem_byte(regs.pc_p + (o) + 1)
 #define get_iword(o) do_get_mem_word(regs.pc_p + (o))
 #define get_ilong(o) do_get_mem_long(regs.pc_p + (o))
@@ -170,6 +175,8 @@ STATIC_INLINE void refill_prefetch (uae_u32 currpc, uae_u32 offs)
 {
     uae_u32 t = (currpc + offs) & ~1;
     uae_u32 r;
+
+//fprintf ( stderr , "refill pc %x o %d old %x\n" , currpc,offs,regs.prefetch_pc );
 #ifdef UNALIGNED_PROFITABLE
     if ( t - regs.prefetch_pc == 2 )				/* keep 1 word and read 1 new word */
     {
@@ -361,6 +368,8 @@ extern uae_u16 last_op_for_exception_3;
 extern uaecptr last_addr_for_exception_3;
 /* Address that generated the exception */
 extern uaecptr last_fault_for_exception_3;
+/* read (0) or write (1) access */
+extern int last_writeaccess_for_exception_3;
 /* instruction (1) or data (0) access */
 extern int last_instructionaccess_for_exception_3;
 
@@ -381,13 +390,19 @@ extern const struct cputbl op_smalltbl_5_ff[];
 
 extern cpuop_func *cpufunctbl[65536];
 
-extern uae_u32 caar, cacr;
 
 /* Family of the latest instruction executed (to check for pairing) */
 extern int OpcodeFamily;			/* see instrmnem in readcpu.h */
 
-/* How many cycles to add to the current instruction in case a "misaligned" bus acces is made */
+/* How many cycles to add to the current instruction in case a "misaligned" bus access is made */
 /* (used when addressing mode is d8(an,ix)) */
 extern int BusCyclePenalty;
+
+STATIC_INLINE bool is_super_access(bool read)
+{
+  return regs.s;
+}
+
+extern bool cpu_bus_rmw;
 
 #endif	/* UAE_NEWCPU_H */

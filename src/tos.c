@@ -16,7 +16,7 @@
   DMA/Microwire addresses on boot-up which (correctly) cause a
   bus-error on Hatari as they would in a real STfm. If a user tries
   to select any of these images we bring up an error. */
-const char TOS_fileid[] = "Hatari tos.c : " __DATE__ " " __TIME__;
+const char TOS_fileid[] = "Hatari tos.c";
 
 #include <SDL_endian.h>
 
@@ -32,15 +32,26 @@ const char TOS_fileid[] = "Hatari tos.c : " __DATE__ " " __TIME__;
 #include "stMemory.h"
 #include "str.h"
 #include "tos.h"
+#include "lilo.h"
 #include "vdi.h"
 #include "falcon/dsp.h"
 #include "clocks_timings.h"
+#include "screen.h"
+#include "video.h"
+
+#include "faketosData.c"
+
+#define TEST_PRG_BASEPAGE 0x1000
+#define TEST_PRG_START (TEST_PRG_BASEPAGE + 0x100)
 
 bool bIsEmuTOS;
+Uint32 EmuTosVersion;
 Uint16 TosVersion;                      /* eg. 0x0100, 0x0102 */
 Uint32 TosAddress, TosSize;             /* Address in ST memory and size of TOS image */
 bool bTosImageLoaded = false;           /* Successfully loaded a TOS image? */
 bool bRamTosImage;                      /* true if we loaded a RAM TOS image */
+bool bUseTos = true;                    /* false if we run in TOS-less test mode */
+const char *psTestPrg;                  /* Points to the name of the PRG that should be used for testing */
 unsigned int ConnectedDriveMask = 0x00; /* Bit mask of connected drives, eg 0x7 is A,B,C */
 int nNumDrives = 2;                     /* Number of drives, default is 2 for A: and B: - Strictly, this is the highest mapped drive letter, in-between drives may not be allocated */
 
@@ -53,63 +64,16 @@ static const char * const pszTosNameExts[] =
 	NULL
 };
 
-static struct {
-	FILE *file;          /* file pointer to contents of INF file */
-	char prgname[16];    /* TOS name of the program to auto start */
-	const char *infname; /* name of the INF file TOS will try to match */
-	int match_count;     /* how many times INF was matched after boot */
-	int match_max;       /* how many times TOS needs it to be matched */
-} TosAutoStart;
-
-/* autostarted program name will be added after first '\' character */
-static const char emudesk_inf[] =
-"#E 9A 07\r\n"
-"#Z 01 C:\\@\r\n"
-"#W 00 00 02 06 26 0C 08 C:\\*.*@\r\n"
-"#W 00 00 02 08 26 0C 00 @\r\n"
-"#W 00 00 02 0A 26 0C 00 @\r\n"
-"#W 00 00 02 0D 26 0C 00 @\r\n"
-"#M 00 00 01 FF A DISK A@ @\r\n"
-"#M 01 00 01 FF B DISK B@ @\r\n"
-"#M 02 00 01 FF C DISK C@ @\r\n"
-"#F FF 28 @ *.*@\r\n"
-"#D FF 02 @ *.*@\r\n"
-"#G 08 FF *.APP@ @\r\n"
-"#G 08 FF *.PRG@ @\r\n"
-"#P 08 FF *.TTP@ @\r\n"
-"#F 08 FF *.TOS@ @\r\n"
-"#T 00 03 03 FF   TRASH@ @\r\n";
-
-static const char desktop_inf[] =
-"#a000000\r\n"
-"#b001000\r\n"
-"#c7770007000600070055200505552220770557075055507703111302\r\n"
-"#d\r\n"
-"#Z 01 C:\\@\r\n"
-"#E D8 11\r\n"
-"#W 00 00 10 01 17 17 13 C:\\*.*@\r\n"
-"#W 00 00 08 0B 1D 0D 00 @\r\n"
-"#W 00 00 0A 0F 1A 09 00 @\r\n"
-"#W 00 00 0E 01 1A 09 00 @\r\n"
-"#M 00 00 05 FF A DISK A@ @\r\n"
-"#M 00 01 05 FF B DISK B@ @\r\n"
-"#M 00 02 05 FF C DISK C@ @\r\n"
-"#T 00 03 02 FF   TRASH@ @\r\n"
-"#F FF 04   @ *.*@\r\n"
-"#D FF 01   @ *.*@\r\n"
-"#P 03 04   @ *.*@\r\n"
-"#G 03 FF   *.APP@ @\r\n"
-"#G 03 FF   *.PRG@ @\r\n"
-"#P 03 FF   *.TTP@ @\r\n"
-"#F 03 04   *.TOS@ @\r\n";
-
 /* Flags that define if a TOS patch should be applied */
 enum
 {
-	TP_ALWAYS,            /* Patch should alway be applied */
+	TP_ALWAYS,            /* Patch should always be applied */
 	TP_HDIMAGE_OFF,       /* Apply patch only if HD emulation is off */
 	TP_ANTI_STE,          /* Apply patch only if running on plain ST */
-	TP_ANTI_PMMU          /* Apply patch only if no PMMU is available */
+	TP_ANTI_PMMU,         /* Apply patch only if no PMMU is available */
+	TP_FIX_040,           /* Apply patch only if CPU is 68040 */
+	TP_FIX_060,           /* Apply patch only if CPU is 68060 */
+	TP_VDIRES,            /* Apply patch only if VDI is used */
 };
 
 /* This structure is used for patching the TOS ROMs */
@@ -126,11 +90,16 @@ typedef struct
 } TOS_PATCH;
 
 static const char pszDmaBoot[] = "boot from DMA bus";
-static const char pszMouse[] = "big resolutions mouse driver";
+static const char pszMouse[] = "big VDI resolutions mouse driver";
 static const char pszRomCheck[] = "ROM checksum";
 static const char pszNoSteHw[] = "disable STE hardware access";
 static const char pszNoPmmu[] = "disable PMMU access";
-static const char pszHwDisable[] = "disable hardware access";
+static const char pszFix060[] = "replace code for 68060";
+static const char pszFix040[] = "replace code for 68040";
+static const char pszFalconExtraRAM[] = "enable extra TT RAM on Falcon";
+static const char pszAtariLogo[] = "draw Atari Logo";
+static const char pszSTbook[] = "disable MCU access on ST-Book";
+static const char pszNoSparrowHw[] = "disable Sparrow hardware access";
 
 //static Uint8 pRtsOpcode[] = { 0x4E, 0x75 };  /* 0x4E75 = RTS */
 static const Uint8 pNopOpcodes[] = { 0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x71,
@@ -138,9 +107,306 @@ static const Uint8 pNopOpcodes[] = { 0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x71, 0x4E, 0
         0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x71 };  /* 0x4E71 = NOP */
 static const Uint8 pMouseOpcode[] = { 0xD3, 0xC1 };  /* "ADDA.L D1,A1" (instead of "ADDA.W D1,A1") */
 static const Uint8 pRomCheckOpcode206[] = { 0x60, 0x00, 0x00, 0x98 };  /* BRA $e00894 */
+static const Uint8 pRomCheckOpcode207[] = { 0x60, 0x00, 0x00, 0x98 };  /* BRA $e00892 */
 static const Uint8 pRomCheckOpcode306[] = { 0x60, 0x00, 0x00, 0xB0 };  /* BRA $e00886 */
 static const Uint8 pRomCheckOpcode404[] = { 0x60, 0x00, 0x00, 0x94 };  /* BRA $e00746 */
 static const Uint8 pBraOpcode[] = { 0x60 };  /* 0x60XX = BRA */
+
+/*
+ * Routine for drawing the Atari logo.
+ * When this function is called, A0 contains a pointer to a 96x86x1 image.
+ * We cannot use the vdi yet (the screen workstation has not yet been opened),
+ * but we can take into account extended VDI modes.
+ */
+static const Uint8 pAtariLogo[] = {
+	0x3e, 0x3c, 0x00, 0x01,     /* move.w    #planes, d7; number will be patched below */
+	0x2c, 0x3c, 0, 0, 1, 64,    /* move.l    #linewidth, d6; number will be patched below */
+	0x22, 0x78, 0x04, 0x4e,     /* movea.l   (_v_bas_ad).w,a1 */
+	0xd3, 0xc6,                 /* adda.l    d6,a1 ; start drawing at 5th line */
+	0xd3, 0xc6,                 /* adda.l    d6,a1 */
+	0xd3, 0xc6,                 /* adda.l    d6,a1 */
+	0xd3, 0xc6,                 /* adda.l    d6,a1 */
+	0xd3, 0xc6,                 /* adda.l    d6,a1 */
+	0x30, 0x3c, 0x00, 0x55,     /* move.w    #$0055,d0 ; 86 lines of data */
+/* logocol1: */
+	0x72, 0x05,                 /* moveq.l   #5,d1 ; 6 words of data per line */
+	0x24, 0x49,                 /* movea.l   a1,a2 */
+/* logocol2: */
+	0x34, 0x18,                 /* move.w    (a0)+,d2 */
+	0x36, 0x07,                 /* move.w    d7,d3 */
+	0x53, 0x43,                 /* subq.w    #1,d3 */
+/* logocol3: */
+	0x34, 0xc2,                 /* move.w    d2,(a2)+ */
+	0x51, 0xcb, 0xff, 0xfc,     /* dbf       d3,logocol3 */
+	0x51, 0xc9, 0xff, 0xf2,     /* dbf       d1,logocol2 */
+	0xd3, 0xc6,                 /* adda.l    d6,a1 */
+	0x51, 0xc8, 0xff, 0xe8,     /* dbf       d0,logocol1 */
+	0x4e, 0x71,                 /* nops to end of original routine */
+	0x4e, 0x71,
+	0x4e, 0x71,
+	0x4e, 0x71,
+	0x4e, 0x71,
+	0x4e, 0x71,
+	0x4e, 0x71,
+	0x4e, 0x71
+};
+
+static const Uint8 p060movep1[] = {	/* replace MOVEP */
+	0x70, 0x0c,			/* moveq #12,d0 */
+	0x42, 0x30, 0x08, 0x00,		/* loop: clr.b 0,(d0,a0) */
+	0x55, 0x40,			/* subq  #2,d0 */
+	0x4a, 0x40,			/* tst.w d0 */
+	0x66, 0xf6,			/* bne.s loop */
+};
+static const Uint8 p060movep2[] = {		/* replace MOVEP */
+	0x41, 0xf8, 0xfa, 0x26,			/* lea    0xfffffa26.w,a0 */
+	0x20, 0xfc, 0x00, 0x00, 0x00, 0x88,	/* move.l #$00000088,(a0)+ */
+	0x20, 0xbc, 0x00, 0x01, 0x00, 0x05,	/* move.l #$00010005,(a0) */
+	0x4a, 0x38, 0x0a, 0x87			/* tst.b  $a87.w */
+};
+static const Uint8 p060movep3_1[] = {		/* replace MOVEP */
+	0x4e, 0xb9, 0x00, 0xe7, 0xf0, 0x00,	/* jsr     $e7f000 */
+	0x4e, 0x71				/* nop */
+};
+static const Uint8 p060movep3_2[] = {		/* replace MOVEP $28(a2),d7 */
+
+	0x00, 0x7c, 0x07, 0x00,			/* ori       #$700,sr */
+	0x1e, 0x2a, 0x00, 0x28,			/* move.b    $28(a2),d7 */
+	0xe1, 0x4f,				/* lsl.w     #8,d7 */
+	0x1e, 0x2a, 0x00, 0x2a,			/* move.b    $2a(a2),d7 */
+	0x48, 0x47,				/* swap      d7 */
+	0x1e, 0x2a, 0x00, 0x2c,			/* move.b    $2c(a2),d7 */
+	0xe1, 0x4f,				/* lsl.w     #8,d7 */
+	0x1e, 0x2a, 0x00, 0x2e,			/* move.b    $2e(a2),d7 */
+	0x4e, 0x75				/* rts */
+};
+
+static const Uint8 pFalconExtraRAM_1[] = {
+	0x4e, 0xb9, 0x00, 0xe7, 0xf1, 0x00	/* jsr       $e7f100 */
+};
+static const Uint8 pFalconExtraRAM_2[] = {	/* call maddalt() to declare the extra RAM */
+	0x20, 0x38, 0x05, 0xa4,			/* move.l    $05a4.w,d0 */
+	0x67, 0x18,				/* beq.s     $ba2d2 */
+	0x04, 0x80, 0x01, 0x00, 0x00, 0x00,	/* subi.l    #$1000000,d0 */
+	0x2f, 0x00,				/* move.l    d0,-(sp) */
+	0x2f, 0x3c, 0x01, 0x00, 0x00, 0x00,	/* move.l    #$1000000,-(sp) */
+	0x3f, 0x3c, 0x00, 0x14,			/* move.w    #$14,-(sp) */
+	0x4e, 0x41,				/* trap      #1 */
+	0x4f, 0xef, 0x00, 0x0a,			/* lea       $a(sp),sp */
+	0x70, 0x03,				/* moveq     #3,d0 */
+	0x4e, 0xf9, 0x00, 0xe0, 0x0b, 0xd2	/* jmp       $e00bd2 */
+};
+
+/* patch for cpu type detection  */
+static unsigned char const pCputype040[58] = {
+	0x20, 0xfc, 0x00, 0x00, 0x00, 0x28,	/* move.l #40,(a0)+ */
+	0x4e, 0x71,				/* nop */
+	0xf5, 0x18,                             /* pflusha */
+	0x4e, 0x71,                             /* nop */
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71
+};
+static unsigned char const pCputype060[58] = {
+	0x20, 0xfc, 0x00, 0x00, 0x00, 0x3c,	/* move.l #60,(a0)+ */
+	0x4e, 0x71,				/* nop */
+	0xf5, 0x18,                             /* pflusha */
+	0x4e, 0x71,                             /* nop */
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71, 0x4e, 0x71,
+	0x4e, 0x71
+};
+
+static unsigned char const pCacheflush[10] = {
+	0x4e, 0x71, 0x4e, 0x71, 0x4e, 0x71,	/* nops */
+	0xf4, 0xf8,				/* cpusha bc */
+	0x4e, 0x71				/* nop */
+};
+static unsigned char const pCacheflush2[14] = {
+	0x4e, 0x71,				/* nop */
+	0xf4, 0xf8, 				/* cpusha bc */
+	0x4e, 0x71, 0x4e, 0x71, 0x4e, 0x71,	/* nops */
+	0x4e, 0x71, 0x4e, 0x71			/* nops */
+};
+static unsigned char const pCacheflush3[12] = {
+	0x4e, 0x71,				/* nop */
+	0xf4, 0xf8,				/* cpusha bc */
+	0x4e, 0x71, 0x4e, 0x71,			/* nops */
+	0x4e, 0x71, 0x4e, 0x71			/* nops */
+};
+static unsigned char const pCacheflush4[12] = {
+	0x4e, 0x71,				/* nop */
+	0xf4, 0x98,				/* cinva ic */
+	0x4e, 0x71, 0x4e, 0x71,			/* nops */
+	0x4e, 0x71, 0x4e, 0x71			/* nops */
+};
+static unsigned char const pColdboot1[10] = {
+	0x4d, 0xfa, 0x00, 0x08,			/* lea.l $00E00064(pc),a6 */
+	0x4e, 0xf9, 0x00, 0xe7, 0xb0, 0x00	/* jmp $00E7B000 */
+};
+static unsigned char const pColdboot2[6] = {
+	0x4e, 0xf9, 0x00, 0xe7, 0xb0, 0xf4	/* jmp $00E7B0F4 */
+};
+static unsigned char const pColdboot3[] = {
+	0x40, 0xc7,				/* move.w    sr,d7 */
+	0x00, 0x7c, 0x07, 0x00,			/* ori.w     #$0700,sr */
+	0x4e, 0x7a, 0x10, 0x06,			/* movec     dtt0,d1 */
+	0x70, 0x00,				/* moveq.l   #0,d0 */
+	0x4e, 0x7b, 0x00, 0x02,			/* movec     d0,cacr */
+	0x4e, 0x71,				/* nop */
+	0xf4, 0xd8,				/* cinva     bc */
+	0x4e, 0x71,				/* nop */
+	0x20, 0x3c, 0x00, 0xff, 0xe0, 0x40,	/* move.l    #$00FFE040,d0 */
+	0x4e, 0x7b, 0x00, 0x06,			/* movec     d0,dtt0 */
+	0x4e, 0x71,				/* nop */
+	0xf5, 0x18,				/* pflusha */
+	0x4e, 0x71,				/* nop */
+	0x7c, 0x00,				/* moveq.l   #0,d6 */
+	0x4e, 0x7a, 0x08, 0x07,			/* movec     srp,d0 */
+	0x4a, 0x80,				/* tst.l     d0 */
+	0x67, 0x32,				/* beq.s     $00E7B062 */
+	0xb0, 0xbc, 0x05, 0x00, 0x00, 0x00,	/* cmp.l     #$05000000,d0 */
+	0x64, 0x2a,				/* bcc.s     $00E7B062 */
+	0xb0, 0xbc, 0x00, 0xe0, 0x00, 0x00,	/* cmp.l     #$00E00000,d0 */
+	0x65, 0x08,				/* bcs.s     $00E7B048 */
+	0xb0, 0xbc, 0x01, 0x00, 0x00, 0x00,	/* cmp.l     #$01000000,d0 */
+	0x65, 0x1a,				/* bcs.s     $00E7B062 */
+	                                      /* e7b048 : */
+	0x20, 0x40,				/* movea.l   d0,a0 */
+	0x0c, 0xa8, 0x54, 0x52, 0x45, 0x45, 0xff, 0xe8,	/* cmpi.l    #$54524545,-24(a0) */
+	0x66, 0x00, 0x00, 0x0e,			/* bne.w     $00E7B062 */
+	0x0c, 0xa8, 0x4b, 0x45, 0x45, 0x50, 0xff, 0xec,	/* cmpi.l    #$4B454550,-20(a0) */
+	0x66, 0x02,				/* bne.s     $00E7B062 */
+	0x7c, 0x01,				/* moveq.l   #1,d6 */
+	                                      /* e7b062 : */
+	0x4e, 0x71,				/* nop */
+	0x4e, 0x7b, 0x10, 0x06,			/* movec     d1,dtt0 */
+	0x4e, 0x71,				/* nop */
+	0xf5, 0x18,				/* pflusha */
+	0x4e, 0x71,				/* nop */
+	0x4a, 0x86,				/* tst.l     d6 */
+	0x67, 0x2e,				/* beq.s     $00E7B0A0 */
+	0x20, 0x08,				/* move.l    a0,d0 */
+	0x4e, 0x7b, 0x08, 0x07,			/* movec     d0,srp */
+	0x4e, 0x7b, 0x08, 0x06,			/* movec     d0,urp */
+	0x20, 0x3c, 0x00, 0x00, 0xc0, 0x00,	/* move.l    #$0000C000,d0 */
+	0x4e, 0x7b, 0x00, 0x03,			/* movec     d0,tc */
+	0x70, 0x00,				/* moveq.l   #0,d0 */
+	0x4e, 0x7b, 0x00, 0x04,			/* movec     d0,itt0 */
+	0x4e, 0x7b, 0x00, 0x05,			/* movec     d0,itt1 */
+	0x4e, 0x7b, 0x00, 0x06,			/* movec     d0,dtt0 */
+	0x4e, 0x7b, 0x00, 0x07,			/* movec     d0,dtt1 */
+	0x4e, 0x71,				/* nop */
+	0xf5, 0x18,				/* pflusha */
+	0x4e, 0x71,				/* nop */
+	0x60, 0x32,				/* bra.s     $00E7B0D2 */
+	                                      /* e7b0a0 : */
+	0x20, 0x3c, 0x00, 0xff, 0xe0, 0x00,	/* move.l    #$00FFE000,d0 */
+	0x4e, 0x7b, 0x00, 0x04,			/* movec     d0,itt0 */
+	0x20, 0x3c,	0x00, 0xff, 0xe0, 0x40,	/* move.l    #$00FFE040,d0 */
+	0x4e, 0x7b, 0x00, 0x06,			/* movec     d0,dtt0 */
+	0x70, 0x00,				/* moveq.l   #0,d0 */
+	0x4e, 0x7b, 0x00, 0x05,			/* movec     d0,itt1 */
+	0x4e, 0x7b, 0x00, 0x07,			/* movec     d0,dtt1 */
+	0x70, 0x00,				/* moveq.l   #0,d0 */
+	0x4e, 0x7b, 0x00, 0x03,			/* movec     d0,tc */
+	0x4e, 0x7b, 0x08, 0x07,			/* movec     d0,srp */
+	0x4e, 0x7b, 0x08, 0x06,			/* movec     d0,urp */
+	0x4e, 0x71,				/* nop */
+	0xf5, 0x18,				/* pflusha */
+	0x4e, 0x71,				/* nop */
+	                                      /* e7b0d2 : */
+	0x20, 0x3c, 0x00, 0x00, 0x80, 0x00,	/* move.l    #$00008000,d0 */
+	0x4e, 0x7b, 0x00, 0x02,			/* movec     d0,cacr */
+	0x46, 0xc7,				/* move.w    d7,sr */
+	0x4e, 0xd6,				/* jmp       (a6) */
+	                                      /* e7b0e0 : */
+	0x08, 0xb8, 0x00, 0x05, 0x82, 0x66,	/* bclr      #5,($FFFF8266).w */
+	0x08, 0xb8, 0x00, 0x06, 0x82, 0x66,	/* bclr      #6,($FFFF8266).w */
+	0x08, 0xb8, 0x00, 0x00, 0x82, 0x0a,	/* bclr      #0,($FFFF820A).w */
+	0x4e, 0xd0,				/* jmp       (a0) */
+	                                      /* e7b0f4 : */
+	0x00, 0x7c, 0x07, 0x00,			/* ori.w     #$0700,sr */
+	0x72, 0x00,				/* moveq.l   #0,d1 */
+	0x41, 0xf8, 0x98, 0x00,			/* lea.l     ($FFFF9800).w,a0 */
+	0x30, 0x3c, 0x00, 0xff,			/* move.w    #$00FF,d0 */
+	0x20, 0xc1,				/* move.l    d1,(a0)+ */
+	0x51, 0xc8, 0xff, 0xfc,			/* dbf       d0,$00E7B102 */
+	0x41, 0xf8, 0x82, 0x40,			/* lea.l     ($FFFF8240).w,a0 */
+	0x70, 0x07,				/* moveq.l   #7,d0 */
+	0x20, 0xc1,				/* move.l    d1,(a0)+ */
+	0x51, 0xc8, 0xff, 0xfc,			/* dbf       d0,$00E7B10E */
+	0x70, 0x00,				/* moveq.l   #0,d0 */
+	0x4e, 0x7b, 0x00, 0x02,			/* movec     d0,cacr */
+	0x4e, 0x71,				/* nop */
+	0x4e, 0x71,				/* nop */
+	0xf4, 0xd8,				/* cinva     bc */
+	0x4e, 0x71,				/* nop */
+	0x41, 0xf8, 0x00, 0x08,			/* lea.l     ($00000008).w,a0 */
+	0x20, 0x3c, 0x00, 0x00, 0x06, 0x00,	/* move.l    #$00000600,d0 */
+	0x90, 0x88,				/* sub.l     a0,d0 */
+	0xe4, 0x88,				/* lsr.l     #2,d0 */
+	0x42, 0x81,				/* clr.l     d1 */
+	                                      /* e7b132 : */
+	0x20, 0xc1,				/* move.l    d1,(a0)+ */
+	0x53, 0x80,				/* subq.l    #1,d0 */
+	0x66, 0xfa,				/* bne.s     $00E7B132 */
+	0x4e, 0x71,				/* nop */
+	0xf5, 0x18,				/* pflusha */
+	0x4e, 0x71,				/* nop */
+	0x20, 0x3c, 0x00, 0xff, 0xe0, 0x00,	/* move.l    #$00FFE000,d0 */
+	0x4e, 0x7b, 0x00, 0x04,			/* movec     d0,itt0 */
+	0x20, 0x3c, 0x00, 0xff, 0xe0, 0x40,	/* move.l    #$00FFE040,d0 */
+	0x4e, 0x7b, 0x00, 0x06,			/* movec     d0,dtt0 */
+	0x70, 0x00,				/* moveq.l   #0,d0 */
+	0x4e, 0x7b, 0x00, 0x05,			/* movec     d0,itt1 */
+	0x4e, 0x7b, 0x00, 0x07,			/* movec     d0,dtt1 */
+	0x4e, 0x71,				/* nop */
+	0x70, 0x00,				/* moveq.l   #0,d0 */
+	0x4e, 0x7b, 0x00, 0x03,			/* movec     d0,tc */
+	0x4e, 0x71,				/* nop */
+	0x4e, 0x7b, 0x08, 0x07,			/* movec     d0,srp */
+	0x4e, 0x7b, 0x08, 0x06,			/* movec     d0,urp */
+	0x4e, 0x71,				/* nop */
+	0x4e, 0xf9, 0x00, 0xe0, 0x00, 0x30,	/* jmp       $00E00030 */
+	                                      /* e7b176 : */
+	0x4e, 0x7a, 0x00, 0x02,			/* movec     cacr,d0 */
+	0x08, 0x80, 0x00, 0x0f,			/* bclr      #15,d0 */
+	0x67, 0x0a,				/* beq.s     $00E7B18A */
+	0x4e, 0x7b, 0x00, 0x02,			/* movec     d0,cacr */
+	0x4e, 0x71,				/* nop */
+	0xf4, 0x98,				/* cinva     ic */
+	0x4e, 0x71,				/* nop */
+	0x4e, 0xf9, 0xde, 0xad, 0xfa, 0xce, 	/* jmp       $DEADFACE */
+	                                      /* e7b190 : */
+	0x20, 0x02, 0x10, 0x21,			/* dc.l 0x20021021 */
+	0x00, 0xe7, 0xb1, 0x9c,			/* dc.l 0x00e7b19c */
+	0x00, 0xe7, 0xb1, 0xa0,			/* dc.l 0x00e7b1a0 */
+	                                      /* e7b19c : */
+	0x73, 0x00,				/* dc.w 0x7300 (nf_id) */
+	0x4e, 0x75,				/* rts */
+	                                      /* e7b1a0 : */
+	0x73, 0x01,				/* dc.w 0x7301 (nf_call) */
+	0x4e, 0x75				/* rts */
+};
 
 /* The patches for the TOS: */
 static const TOS_PATCH TosPatches[] =
@@ -185,32 +451,245 @@ static const TOS_PATCH TosPatches[] =
   /* as we've changed bytes in the ROM! So, just skip anyway! */
   { 0x206, -1, pszRomCheck, TP_ALWAYS, 0xE007FA, 0x2E3C0001, 4, pRomCheckOpcode206 },
   { 0x206, -1, pszDmaBoot, TP_HDIMAGE_OFF, 0xE00898, 0x610000E0, 4, pNopOpcodes }, /* BSR.W $E0097A */
+  { 0x206, -1, pszAtariLogo, TP_VDIRES, 0xE0076C, 0x1038044c, sizeof( pAtariLogo ), pAtariLogo },
+
+  { 0x207, -1, pszNoSparrowHw, TP_ALWAYS, 0xE02D90, 0x08F80005, 6, pNopOpcodes },  /* BSET #5,$ffff8e0d.w */
+  { 0x207, -1, pszRomCheck, TP_ALWAYS, 0xE007F8, 0x2E3C0001, 4, pRomCheckOpcode207 },
+  { 0x207, -1, pszDmaBoot, TP_HDIMAGE_OFF, 0xE008DC, 0x610000E0, 4, pNopOpcodes }, /* BSR.W $E009BE */
+  { 0x207, -1, pszAtariLogo, TP_VDIRES, 0xE0076A, 0x1038044c, sizeof(pAtariLogo), pAtariLogo },
+
+  { 0x208, -1, pszDmaBoot, TP_HDIMAGE_OFF, 0xE00806, 0x610000E8, 4, pNopOpcodes }, /* BSR.W $E008F0 */
+  { 0x208, -1, pszAtariLogo, TP_VDIRES, 0xE006B4, 0x1038044c, sizeof( pAtariLogo ), pAtariLogo },
+  { 0x208, -1, pszSTbook, TP_ALWAYS, 0xE00066, 0x303900d0, 18, pNopOpcodes },
+  { 0x208, -1, pszSTbook, TP_ALWAYS, 0xE000D6, 0x4a7900d0, 6, pNopOpcodes },
+  { 0x208, -1, pszSTbook, TP_ALWAYS, 0xE009FE, 0x303900d0, 14, pNopOpcodes },
 
   { 0x306, -1, pszRomCheck, TP_ALWAYS, 0xE007D4, 0x2E3C0001, 4, pRomCheckOpcode306 },
-  { 0x306, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE00068, 0xF0394000, 24, pNopOpcodes },
-  { 0x306, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE01702, 0xF0394C00, 32, pNopOpcodes },
+  { 0x306, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE00068, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
+  { 0x306, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE01702, 0xF0394C00, 32, pNopOpcodes }, /* pmove : CRP=80000002 00000700 TC=80f04445 TT0=017e8107 TT1=807e8507 -> */
+  { 0x306, -1, pszFix060, TP_FIX_060, 0xe024dc, 0x01C80000, 12, p060movep1 },
+  { 0x306, -1, pszFix060, TP_FIX_060, 0xe024fa, 0x01C80000, 12, p060movep1 },
+  { 0x306, -1, pszAtariLogo, TP_VDIRES, 0xE00754, 0x1038044c, sizeof( pAtariLogo ), pAtariLogo },
 
-  { 0x400, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE00064, 0xF0394000, 24, pNopOpcodes },
+  { 0x400, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE00064, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
   { 0x400, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE0148A, 0xF0394C00, 32, pNopOpcodes },
-  { 0x400, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE03948, 0xF0394000, 24, pNopOpcodes },
+  { 0x400, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE03948, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
   { 0x400, -1, pszRomCheck, TP_ALWAYS, 0xE00686, 0x2E3C0007, 4, pRomCheckOpcode404 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE003BE, 0x7200347C, sizeof(pCputype040), pCputype040 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE00614, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE0072C, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE00836, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE01894, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE01916, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE00054, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE03934, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE098AC, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE23636, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix040, TP_FIX_040, 0xE41634, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE003BE, 0x7200347C, sizeof(pCputype060), pCputype060 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE00614, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE0072C, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE00836, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE01894, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE01916, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE00054, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE03934, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE098AC, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE23636, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE41634, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE0258A, 0x01C80000, 12, p060movep1 },
+  { 0x400, -1, pszFix060, TP_FIX_060, 0xE025DA, 0x41F8FA01, 20, p060movep2 },
 
-  { 0x401, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE0006A, 0xF0394000, 24, pNopOpcodes },
+  { 0x401, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE0006A, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
   { 0x401, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE014A8, 0xF0394C00, 32, pNopOpcodes },
-  { 0x401, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE03946, 0xF0394000, 24, pNopOpcodes },
+  { 0x401, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE03946, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
   { 0x401, -1, pszRomCheck, TP_ALWAYS, 0xE006A6, 0x2E3C0007, 4, pRomCheckOpcode404 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE003C4, 0x7200347C, sizeof(pCputype040), pCputype040 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE00634, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE0074C, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE00856, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE01892, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE01914, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE0005A, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE03932, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE098A2, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE11B28, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE11BB0, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE11CAC, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12512, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12888, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE128D4, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12938, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12B50, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12BD0, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12C48, 0x4E7B2002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12CC6, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12D2E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE12DF0, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE17AA6, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE17B3E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE23840, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix040, TP_FIX_040, 0xE42670, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE003C4, 0x7200347C, sizeof(pCputype060), pCputype060 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE00634, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE0074C, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE00856, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE01892, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE01914, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE0005A, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE03932, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE098A2, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE11B28, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE11BB0, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE11CAC, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12512, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12888, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE128D4, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12938, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12B50, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12BD0, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12C48, 0x4E7B2002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12CC6, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12D2E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE12DF0, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE17AA6, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE17B3E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE23840, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE42670, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE02588, 0x01C80000, 12, p060movep1 },
+  { 0x401, -1, pszFix060, TP_FIX_060, 0xE025D8, 0x41F8FA01, 20, p060movep2 },
 
-  { 0x402, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE0006A, 0xF0394000, 24, pNopOpcodes },
+  { 0x402, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE0006A, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
   { 0x402, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE014A8, 0xF0394C00, 32, pNopOpcodes },
-  { 0x402, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE03946, 0xF0394000, 24, pNopOpcodes },
+  { 0x402, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE03946, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
   { 0x402, -1, pszRomCheck, TP_ALWAYS, 0xE006A6, 0x2E3C0007, 4, pRomCheckOpcode404 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE003C4, 0x7200347C, sizeof(pCputype040), pCputype040 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE00634, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE0074C, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE00856, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE01892, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE01914, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE0005A, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE03932, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE098AC, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE11B76, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE11BFE, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE11CFA, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12560, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE128D6, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12922, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12986, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12B9E, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12C1E, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12C96, 0x4E7B2002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12D14, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12D7C, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE12E3E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE17AF4, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE17B8C, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE25078, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix040, TP_FIX_040, 0xE444B0, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE003C4, 0x7200347C, sizeof(pCputype060), pCputype060 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE00634, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE0074C, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE00856, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE01892, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE01914, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE0005A, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE03932, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE098AC, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE11B76, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE11BFE, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE11CFA, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12560, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE128D6, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12986, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12922, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12B9E, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12C1E, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12C96, 0x4E7B2002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12D14, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12D7C, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE12E3E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE17AF4, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE17B8C, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE25078, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE444B0, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE02588, 0x01C80000, 12, p060movep1 },
+  { 0x402, -1, pszFix060, TP_FIX_060, 0xE025D8, 0x41F8FA01, 20, p060movep2 },
 
-  { 0x404, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE0006A, 0xF0394000, 24, pNopOpcodes },
-  { 0x404, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE014E6, 0xF0394C00, 32, pNopOpcodes },
-  { 0x404, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE039A0, 0xF0394000, 24, pNopOpcodes },
+  { 0x404, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE0006A, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
+  { 0x404, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE014E6, 0xF0394C00, 32, pNopOpcodes }, /* pmove : CRP=80000002 00000700 TC=80f04445 TT0=017e8107 TT1=807e8507 -> */
+  { 0x404, -1, pszNoPmmu, TP_ANTI_PMMU, 0xE039A0, 0xF0394000, 24, pNopOpcodes }, /* pmove : TC=0 TT0=0 TT1=0 -> disable MMU */
   { 0x404, -1, pszRomCheck, TP_ALWAYS, 0xE006B0, 0x2E3C0007, 4, pRomCheckOpcode404 },
   { 0x404, -1, pszDmaBoot, TP_ALWAYS, 0xE01C9E, 0x62FC31FC, 2, pNopOpcodes },  /* Just a delay */
   { 0x404, -1, pszDmaBoot, TP_ALWAYS, 0xE01CB2, 0x62FC31FC, 2, pNopOpcodes },  /* Just a delay */
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE003C4, 0x7200347C, sizeof(pCputype040), pCputype040 },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE0063E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE00756, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE00860, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE018D0, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE01952, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE0005A, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE0398C, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE0990C, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE11BD6, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE11C5E, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE11D5A, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE125C0, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12936, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12982, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE129E6, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12BFE, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12C7E, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12CF6, 0x4E7B2002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12D74, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12DDC, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE12E9E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE17B54, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE17BEC, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE250D8, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix040, TP_FIX_040, 0xE44510, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE003C4, 0x7200347C, sizeof(pCputype060), pCputype060 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE0063E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE00756, 0x203C0000, sizeof(pCacheflush), pCacheflush },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE00860, 0x4E7A0002, sizeof(pCacheflush2), pCacheflush2 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE018D0, 0x4E7A1002, sizeof(pCacheflush3), pCacheflush3 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE01952, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE0005A, 0x203c0000, sizeof(pColdboot1), pColdboot1 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE0398C, 0x46FC2700, sizeof(pColdboot2), pColdboot2 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE7B000, 0xFFFFFFFF, sizeof(pColdboot3), pColdboot3 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE0990C, 0x4E7A2002, sizeof(pCacheflush4), pCacheflush4 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE11BD6, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE11C5E, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE11D5A, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE125C0, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12936, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12982, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE129E6, 0x4E7B6002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12BFE, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12C7E, 0x4E7B5002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12CF6, 0x4E7B2002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12D74, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12DDC, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE12E9E, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE17B54, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE17BEC, 0x4E7B0002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE250D8, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE44510, 0x4E7B7002, 4, pNopOpcodes },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE025E2, 0x01C80000, 12, p060movep1 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE02632, 0x41F8FA01, 20, p060movep2 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE02B1E, 0x007c0700, 8, p060movep3_1 },
+  { 0x404, -1, pszFix060, TP_FIX_060, 0xE7F000, 0xFFFFFFFF, sizeof( p060movep3_2 ), p060movep3_2 },
+  { 0x404, -1, pszFalconExtraRAM, TP_ALWAYS, 0xE0096E, 0x70036100, 6, pFalconExtraRAM_1 },
+  { 0x404, -1, pszFalconExtraRAM, TP_ALWAYS, 0xE7F100, 0xFFFFFFFF, sizeof( pFalconExtraRAM_2 ), pFalconExtraRAM_2 },
 
   { 0x492, -1, pszNoPmmu, TP_ANTI_PMMU, 0x00F946, 0xF0394000, 24, pNopOpcodes },
   { 0x492, -1, pszNoPmmu, TP_ANTI_PMMU, 0x01097A, 0xF0394C00, 32, pNopOpcodes },
@@ -243,8 +722,10 @@ void TOS_MemorySnapShot_Capture(bool bSave)
  * So, how do we find these addresses when we have no commented source code?
  * - For the "Boot from DMA bus" patch:
  *   Scan at start of rom for tst.w $482, boot call will be just above it.
+ *
+ * Set logpatch_addr if patch for that is needed.
  */
-static void TOS_FixRom(void)
+static void TOS_FixRom(Uint32 *logopatch_addr)
 {
 	int nGoodPatches, nBadPatches;
 	short TosCountry;
@@ -269,38 +750,43 @@ static void TOS_FixRom(void)
 		    && (pPatch->Country == TosCountry || pPatch->Country == -1))
 		{
 #if ENABLE_WINUAE_CPU
-			bool use_mmu = ConfigureParams.System.bMMU;
+			bool use_mmu = ConfigureParams.System.bMMU &&
+			               ConfigureParams.System.nCpuLevel == 3;
 #else
 			bool use_mmu = false;
 #endif
-			/* Make sure that we really patch the right place by comparing data: */
-			if(STMemory_ReadLong(pPatch->Address) == pPatch->OldData)
+			/* Only apply the patch if it is really needed: */
+			if (pPatch->Flags == TP_ALWAYS
+			    || (pPatch->Flags == TP_HDIMAGE_OFF && !bAcsiEmuOn
+			        && !ConfigureParams.Ide[0].bUseDevice
+			        && ConfigureParams.System.bFastBoot)
+			    || (pPatch->Flags == TP_ANTI_STE && Config_IsMachineST())
+			    || (pPatch->Flags == TP_ANTI_PMMU && !use_mmu)
+			    || (pPatch->Flags == TP_VDIRES && bUseVDIRes)
+			    || (pPatch->Flags == TP_FIX_060 && ConfigureParams.System.nCpuLevel > 4)
+			    || (pPatch->Flags == TP_FIX_040 && ConfigureParams.System.nCpuLevel == 4)
+			   )
 			{
-				/* Only apply the patch if it is really needed: */
-				if (pPatch->Flags == TP_ALWAYS
-				    || (pPatch->Flags == TP_HDIMAGE_OFF && !ACSI_EMU_ON
-				        && !ConfigureParams.HardDisk.bUseIdeMasterHardDiskImage
-				        && ConfigureParams.System.bFastBoot)
-				    || (pPatch->Flags == TP_ANTI_STE
-				        && ConfigureParams.System.nMachineType == MACHINE_ST)
-				    || (pPatch->Flags == TP_ANTI_PMMU && !use_mmu)
-				   )
+				/* Make sure that we really patch the right place by comparing data: */
+				if(STMemory_ReadLong(pPatch->Address) == pPatch->OldData)
 				{
 					/* Now we can really apply the patch! */
 					Log_Printf(LOG_DEBUG, "Applying TOS patch '%s'.\n", pPatch->pszName);
 					memcpy(&RomMem[pPatch->Address], pPatch->pNewData, pPatch->Size);
 					nGoodPatches += 1;
+					if (strcmp(pPatch->pszName, pszAtariLogo) == 0)
+						*logopatch_addr = pPatch->Address;
 				}
 				else
 				{
-					Log_Printf(LOG_DEBUG, "Skipped patch '%s'.\n", pPatch->pszName);
+					Log_Printf(LOG_DEBUG, "Failed to apply TOS patch '%s' at %x (expected %x, found %x).\n",
+					           pPatch->pszName, pPatch->Address, pPatch->OldData, STMemory_ReadLong(pPatch->Address));
+					nBadPatches += 1;
 				}
 			}
 			else
 			{
-				Log_Printf(LOG_DEBUG, "Failed to apply TOS patch '%s' at %x (expected %x, found %x).\n",
-				           pPatch->pszName, pPatch->Address, pPatch->OldData, STMemory_ReadLong(pPatch->Address));
-				nBadPatches += 1;
+				Log_Printf(LOG_DEBUG, "Skipped patch '%s'.\n", pPatch->pszName);
 			}
 		}
 		pPatch += 1;
@@ -308,136 +794,6 @@ static void TOS_FixRom(void)
 
 	Log_Printf(LOG_DEBUG, "Applied %i TOS patches, %i patches failed.\n",
 	           nGoodPatches, nBadPatches);
-}
-
-
-/*-----------------------------------------------------------------------*/
-/**
- * Set name of program that will be auto started after TOS boots.
- * Supported only from TOS 1.04 forward.
- */
-void TOS_AutoStart(const char *prgname)
-{
-	Str_Filename2TOSname(prgname, TosAutoStart.prgname);
-}
-
-/*-----------------------------------------------------------------------*/
-/**
- * Create a temporary desktop.inf file which will start autostart program.
- * This needs to be re-created on each boot in case user changed TOS version.
- */
-static void TOS_CreateAutoInf(void)
-{
-	const char *contents, *infname, *prgname;
-	int offset, size, max;
-	FILE *fp;
-
-	/* in case TOS didn't for some reason close it on previous boot */
-	TOS_AutoStartClose(TosAutoStart.file);
-
-	prgname = TosAutoStart.prgname;
-	/* autostart not enabled? */
-	if (!*prgname)
-		return;
-
-	/* autostart not supported? */
-	if (TosVersion < 0x0104)
-	{
-		Log_Printf(LOG_WARN, "Only TOS versions >= 1.04 support autostarting!\n");
-		return;
-	}
-
-	if (bIsEmuTOS)
-	{
-		infname = "C:\\EMUDESK.INF";
-		size = sizeof(emudesk_inf);
-		contents = emudesk_inf;
-		max = 1;
-	} else {
-		/* need to match file TOS searches first */
-		if (TosVersion >= 0x0200)
-			infname = "NEWDESK.INF";
-		else
-			infname = "DESKTOP.INF";
-		size = sizeof(desktop_inf);
-		contents = desktop_inf;
-		max = 1;
-	}
-	/* infname needs to be exactly the same string that given
-	 * TOS version gives for GEMDOS to find.
-	 */
-	TosAutoStart.infname = infname;
-	TosAutoStart.match_max = max;
-	TosAutoStart.match_count = 0;
-
-	/* find where to insert the program name */
-	for (offset = 0; offset < size; )
-	{
-		if (contents[offset++] == '\\')
-			break;
-	}
-	assert(offset < size);
-
-	/* create the autostart file */
-	fp = tmpfile();
-	if (!(fp
-	      && fwrite(contents, offset, 1, fp) == 1
-	      && fwrite(prgname, strlen(prgname), 1, fp) == 1
-	      && fwrite(contents+offset, size-offset-1, 1, fp) == 1
-	      && fseek(fp, 0, SEEK_SET) == 0))
-	{
-		if (fp)
-			fclose(fp);
-		Log_Printf(LOG_ERROR, "Failed to create autostart file for '%s'!\n", TosAutoStart.prgname);
-		return;
-	}
-	TosAutoStart.file = fp;
-	Log_Printf(LOG_WARN, "Virtual autostart file '%s' created for '%s'.\n", infname, prgname);
-}
-
-/*-----------------------------------------------------------------------*/
-/**
- * If given name matches autostart file, return its handle, NULL otherwise
- */
-FILE *TOS_AutoStartOpen(const char *filename)
-{
-	if (TosAutoStart.file && strcmp(filename, TosAutoStart.infname) == 0)
-	{
-		/* whether to "autostart" also exception debugging? */
-		if (ConfigureParams.Log.nExceptionDebugMask & EXCEPT_AUTOSTART)
-		{
-			ExceptionDebugMask = ConfigureParams.Log.nExceptionDebugMask & ~EXCEPT_AUTOSTART;
-			fprintf(stderr, "Exception debugging enabled (0x%x).\n", ExceptionDebugMask);
-		}
-		Log_Printf(LOG_WARN, "Autostart file '%s' for '%s' matched.\n", filename, TosAutoStart.prgname);
-		return TosAutoStart.file;
-	}
-	return NULL;
-}
-
-/*-----------------------------------------------------------------------*/
-/**
- * If given handle matches autostart file, close it and return true,
- * false otherwise.
- */
-bool TOS_AutoStartClose(FILE *fp)
-{
-	if (fp && fp == TosAutoStart.file)
-	{
-		if (++TosAutoStart.match_count >= TosAutoStart.match_max)
-		{
-			/* Remove autostart INF file after TOS has
-			 * read it enough times to do autostarting.
-			 * Otherwise user may try change desktop settings
-			 * and save them, but they would be lost.
-			 */
-			fclose(TosAutoStart.file);
-			TosAutoStart.file = NULL;
-			Log_Printf(LOG_WARN, "Autostart file removed.\n");
-		}
-		return true;
-	}
-	return false;
 }
 
 
@@ -455,6 +811,10 @@ static void TOS_CheckSysConfig(void)
 {
 	int oldCpuLevel = ConfigureParams.System.nCpuLevel;
 	MACHINETYPE oldMachineType = ConfigureParams.System.nMachineType;
+#if ENABLE_WINUAE_CPU
+	FPUTYPE oldFpuType = ConfigureParams.System.n_FPUType;
+#endif
+
 	if (((TosVersion == 0x0106 || TosVersion == 0x0162) && ConfigureParams.System.nMachineType != MACHINE_STE)
 	    || (TosVersion == 0x0162 && ConfigureParams.System.nCpuLevel != 0))
 	{
@@ -463,38 +823,43 @@ static void TOS_CheckSysConfig(void)
 		IoMem_UnInit();
 		ConfigureParams.System.nMachineType = MACHINE_STE;
 		ClocksTimings_InitMachine ( ConfigureParams.System.nMachineType );
+		Video_SetTimings ( ConfigureParams.System.nMachineType , ConfigureParams.System.VideoTimingMode );
 		IoMem_Init();
-		ConfigureParams.System.nCpuFreq = 8;
+		Configuration_ChangeCpuFreq ( 8 );
 		ConfigureParams.System.nCpuLevel = 0;
 	}
-	else if ((TosVersion & 0x0f00) == 0x0300 && ConfigureParams.System.nMachineType != MACHINE_TT)
+	else if ((TosVersion & 0x0f00) == 0x0300 && !Config_IsMachineTT())
 	{
 		Log_AlertDlg(LOG_ERROR, "TOS versions 3.0x are for Atari TT only.\n"
 		             " ==> Switching to TT mode now.\n");
 		IoMem_UnInit();
 		ConfigureParams.System.nMachineType = MACHINE_TT;
 		ClocksTimings_InitMachine ( ConfigureParams.System.nMachineType );
+		Video_SetTimings ( ConfigureParams.System.nMachineType , ConfigureParams.System.VideoTimingMode );
 		IoMem_Init();
-		ConfigureParams.System.nCpuFreq = 32;
+		Configuration_ChangeCpuFreq ( 32 );
 		ConfigureParams.System.nCpuLevel = 3;
 	}
-	else if ((TosVersion & 0x0f00) == 0x0400 && ConfigureParams.System.nMachineType != MACHINE_FALCON)
+	else if (((TosVersion & 0x0f00) == 0x0400 || TosVersion == 0x0207)
+	         && !Config_IsMachineFalcon())
 	{
-		Log_AlertDlg(LOG_ERROR, "TOS versions 4.x are for Atari Falcon only.\n"
-		             " ==> Switching to Falcon mode now.\n");
+		Log_AlertDlg(LOG_ERROR, "TOS version %x.%02x is for Atari Falcon only.\n"
+		             " ==> Switching to Falcon mode now.\n",
+		             TosVersion >> 8, TosVersion & 0xff);
 		IoMem_UnInit();
 		ConfigureParams.System.nMachineType = MACHINE_FALCON;
 		ClocksTimings_InitMachine ( ConfigureParams.System.nMachineType );
+		Video_SetTimings ( ConfigureParams.System.nMachineType , ConfigureParams.System.VideoTimingMode );
 #if ENABLE_DSP_EMU
 		ConfigureParams.System.nDSPType = DSP_TYPE_EMU;
-		DSP_Init();
+		DSP_Enable();
 #endif
 		IoMem_Init();
-		ConfigureParams.System.nCpuFreq = 16;
+		Configuration_ChangeCpuFreq ( 16 );
 		ConfigureParams.System.nCpuLevel = 3;
 	}
 	else if (TosVersion <= 0x0104 &&
-	         (ConfigureParams.System.nCpuLevel > 0 || ConfigureParams.System.nMachineType != MACHINE_ST))
+	         (ConfigureParams.System.nCpuLevel > 0 || !Config_IsMachineST()))
 	{
 		Log_AlertDlg(LOG_ERROR, "TOS versions <= 1.4 work only in\n"
 		             "ST mode and with a 68000 CPU.\n"
@@ -502,20 +867,21 @@ static void TOS_CheckSysConfig(void)
 		IoMem_UnInit();
 		ConfigureParams.System.nMachineType = MACHINE_ST;
 		ClocksTimings_InitMachine ( ConfigureParams.System.nMachineType );
+		Video_SetTimings ( ConfigureParams.System.nMachineType , ConfigureParams.System.VideoTimingMode );
 		IoMem_Init();
-		ConfigureParams.System.nCpuFreq = 8;
+		Configuration_ChangeCpuFreq ( 8 );
 		ConfigureParams.System.nCpuLevel = 0;
 	}
-	else if ((TosVersion < 0x0300 && ConfigureParams.System.nMachineType == MACHINE_FALCON)
-	         || (TosVersion < 0x0200 && ConfigureParams.System.nMachineType == MACHINE_TT))
+	else if (TosVersion < 0x0300 && (Config_IsMachineTT() || Config_IsMachineFalcon()))
 	{
 		Log_AlertDlg(LOG_ERROR, "This TOS version does not work in TT/Falcon mode.\n"
 		             " ==> Switching to STE mode now.\n");
 		IoMem_UnInit();
 		ConfigureParams.System.nMachineType = MACHINE_STE;
 		ClocksTimings_InitMachine ( ConfigureParams.System.nMachineType );
+		Video_SetTimings ( ConfigureParams.System.nMachineType , ConfigureParams.System.VideoTimingMode );
 		IoMem_Init();
-		ConfigureParams.System.nCpuFreq = 8;
+		Configuration_ChangeCpuFreq ( 8 );
 		ConfigureParams.System.nCpuLevel = 0;
 	}
 	else if ((TosVersion & 0x0f00) == 0x0400 && ConfigureParams.System.nCpuLevel < 2)
@@ -524,17 +890,29 @@ static void TOS_CheckSysConfig(void)
 		             " ==> Switching to 68020 mode now.\n");
 		ConfigureParams.System.nCpuLevel = 2;
 	}
+#if ENABLE_WINUAE_CPU
+	else if ((TosVersion & 0x0f00) == 0x0300 &&
+	         (ConfigureParams.System.nCpuLevel < 2 || ConfigureParams.System.n_FPUType == FPU_NONE))
+	{
+		Log_AlertDlg(LOG_ERROR, "TOS versions 3.0x require a CPU >= 68020 with FPU.\n"
+		             " ==> Switching to 68030 mode with FPU now.\n");
+		ConfigureParams.System.nCpuLevel = 3;
+		ConfigureParams.System.n_FPUType = FPU_68882;
+	}
+#else
 	else if ((TosVersion & 0x0f00) == 0x0300 && ConfigureParams.System.nCpuLevel < 3)
 	{
-		Log_AlertDlg(LOG_ERROR, "TOS versions 3.0x require a CPU >= 68030.\n"
-		             " ==> Switching to 68030 mode now.\n");
+		Log_AlertDlg(LOG_ERROR, "TOS versions 3.0x require a CPU >= 68020 with FPU.\n"
+		             " ==> Switching to 68030 mode with FPU now.\n");
 		ConfigureParams.System.nCpuLevel = 3;
 	}
+#endif
+
 	/* TOS version triggered changes? */
 	if (ConfigureParams.System.nMachineType != oldMachineType)
 	{
 #if ENABLE_WINUAE_CPU
-		if (ConfigureParams.System.nMachineType == MACHINE_TT)
+		if (Config_IsMachineTT())
 		{
 			ConfigureParams.System.bCompatibleFPU = true;
 			ConfigureParams.System.n_FPUType = FPU_68882;
@@ -549,7 +927,11 @@ static void TOS_CheckSysConfig(void)
 #endif
 		M68000_CheckCpuSettings();
 	}
-	else if (ConfigureParams.System.nCpuLevel != oldCpuLevel)
+	else if (ConfigureParams.System.nCpuLevel != oldCpuLevel
+#if ENABLE_WINUAE_CPU
+		 || ConfigureParams.System.n_FPUType != oldFpuType
+#endif
+		)
 	{
 		M68000_CheckCpuSettings();
 	}
@@ -558,30 +940,32 @@ static void TOS_CheckSysConfig(void)
 		Log_AlertDlg(LOG_ERROR, "Please use at least TOS v1.04 for the HD directory emulation "
 			     "(all required GEMDOS functionality isn't completely emulated for this TOS version).");
 	}
+	if (Config_IsMachineFalcon() && bUseVDIRes && !bIsEmuTOS)
+	{
+		Log_AlertDlg(LOG_ERROR, "Please use 512k EmuTOS instead of TOS v4 "
+			     "for proper extended VDI resolutions support on Falcon.");
+	}
 }
 
 
-/*-----------------------------------------------------------------------*/
 /**
- * Load TOS Rom image file into ST memory space and fix image so it can be
- * emulated correctly.  Pre TOS 1.06 are loaded at 0xFC0000 and later ones
- * at 0xE00000.
+ * Load TOS Rom image file and do some basic sanity checks.
+ * Returns pointer to allocated memory with TOS data, or NULL for error.
  */
-int TOS_LoadImage(void)
+static uint8_t *TOS_LoadImage(void)
 {
-	Uint8 *pTosFile = NULL;
+	uint8_t *pTosFile = NULL;
 	long nFileSize;
-
-	bTosImageLoaded = false;
 
 	/* Load TOS image into memory so that we can check its version */
 	TosVersion = 0;
-	pTosFile = HFile_Read(ConfigureParams.Rom.szTosImageFileName, &nFileSize, pszTosNameExts);
+	pTosFile = File_Read(ConfigureParams.Rom.szTosImageFileName, &nFileSize, pszTosNameExts);
 
-	if (!pTosFile || nFileSize <= 0)
+	if (!pTosFile || nFileSize < 0x40)
 	{
 		Log_AlertDlg(LOG_FATAL, "Can not load TOS file:\n'%s'", ConfigureParams.Rom.szTosImageFileName);
-		return -1;
+		free(pTosFile);
+		return NULL;
 	}
 
 	TosSize = nFileSize;
@@ -609,10 +993,20 @@ int TOS_LoadImage(void)
 
 	/* Check for EmuTOS ... (0x45544F53 = 'ETOS') */
 	bIsEmuTOS = (SDL_SwapBE32(*(Uint32 *)&pTosFile[0x2c]) == 0x45544F53);
+	if (bIsEmuTOS)
+	{
+		/* The magic value 'OSXH' indicates an extended header */
+		if (SDL_SwapBE32(*(Uint32 *)&pTosFile[0x34]) == 0x4F535848)
+			EmuTosVersion = SDL_SwapBE32(*(Uint32 *)&pTosFile[0x3c]);
+		else
+			EmuTosVersion = 0;	/* Older than 1.0 */
+	}
 
 	/* Now, look at start of image to find Version number and address */
 	TosVersion = SDL_SwapBE16(*(Uint16 *)&pTosFile[2]);
 	TosAddress = SDL_SwapBE32(*(Uint32 *)&pTosFile[8]);
+	if (TosVersion == 0x206 && SDL_SwapBE16(*(Uint16 *)&pTosFile[30]) == 0x186A)
+		TosVersion = 0x208;
 
 	/* Check for reasonable TOS version: */
 	if (TosVersion == 0x000 && TosSize == 16384)
@@ -624,35 +1018,145 @@ int TOS_LoadImage(void)
 		 * just for fun. */
 		TosAddress = 0xfc0000;
 	}
-	else if (TosVersion<0x100 || TosVersion>=0x500 || TosSize>1024*1024L
-	    || (!bRamTosImage && TosAddress!=0xe00000 && TosAddress!=0xfc0000))
+	else if (TosVersion < 0x100 || TosVersion >= 0x500 || TosSize > 1024*1024L
+	         || (TosAddress == 0xfc0000 && TosSize > 224*1024L)
+	         || (bRamTosImage && TosAddress + TosSize > STRamEnd)
+	         || (!bRamTosImage && TosAddress != 0xe00000 && TosAddress != 0xfc0000))
 	{
 		Log_AlertDlg(LOG_FATAL, "Your TOS image seems not to be a valid TOS ROM file!\n"
 		             "(TOS version %x, address $%x)", TosVersion, TosAddress);
-		return -2;
+		free(pTosFile);
+		return NULL;
 	}
 
-	/* Assert that machine type matches the TOS version. Note that EmuTOS can
-	 * handle all machine types, so we don't do the system check there: */
-	if (!bIsEmuTOS)
+	/* Assert that machine type matches the TOS version.
+	 * 512k EmuTOS declares itself as TOS 2.x, but it can handle
+	 * all machine types, so it can & needs to be skipped here
+	 */
+	if (!(bIsEmuTOS && TosSize == 512*1024))
 		TOS_CheckSysConfig();
 
-	/* Calculate end of RAM */
-	if (ConfigureParams.Memory.nMemorySize > 0
-	    && ConfigureParams.Memory.nMemorySize <= 14)
-		STRamEnd = ConfigureParams.Memory.nMemorySize * 0x100000;
+#if ENABLE_WINUAE_CPU
+	/* 32-bit addressing is supported only by CPU >= 68020, TOS v3, TOS v4 and EmuTOS */
+	if (ConfigureParams.System.nCpuLevel < 2 || (TosVersion < 0x0300 && !bIsEmuTOS))
+	{
+		ConfigureParams.System.bAddressSpace24 = true;
+		M68000_CheckCpuSettings();
+	}
+	else if (ConfigureParams.Memory.TTRamSize_KB)
+	{
+		switch (ConfigureParams.System.nMachineType)
+		{
+		case MACHINE_TT:
+			if (ConfigureParams.System.bAddressSpace24)
+			{
+				/* Print a message and force 32 bit addressing (keeping 24 bit with TT RAM would crash TOS) */
+				Log_AlertDlg(LOG_ERROR, "Enabling 32-bit addressing for TT-RAM access.\nThis can cause issues in some programs!\n");
+				ConfigureParams.System.bAddressSpace24 = false;
+				M68000_CheckCpuSettings();
+			}
+			break;
+		case MACHINE_FALCON:
+			if (ConfigureParams.System.bAddressSpace24)
+			{
+				/* Print a message, but don't force 32 bit addressing as 24 bit addressing is also possible under Falcon */
+				/* So, if Falcon is in 24 bit mode, we just don't add TT RAM */
+				Log_AlertDlg(LOG_ERROR, "You need to disable 24-bit addressing to use TT-RAM in Falcon mode.\n");
+			}
+			break;
+		default:
+			break;
+		}
+	}
+#endif
+
+	return pTosFile;
+}
+
+
+/**
+ * Set the name of the program that should be tested (without TOS)
+ */
+void TOS_SetTestPrgName(const char *testprg)
+{
+	psTestPrg = testprg;
+}
+
+
+/**
+ * Create a fake TOS ROM that just jumps to test code in memory
+ */
+static uint8_t *TOS_FakeRomForTesting(void)
+{
+	uint8_t *pFakeTosMem;
+
+	/* We don't have a proper memory detection code in above init code,
+	 * so we have to disable the MMU emulation in this TOS-less mode */
+	ConfigureParams.System.bFastBoot = true;
+
+	TosVersion = 0;
+	TosAddress = 0xe00000;
+	TosSize = sizeof(FakeTos_data);
+
+	pFakeTosMem = malloc(TosSize);
+	if (!pFakeTosMem)
+		return NULL;
+
+	memcpy(pFakeTosMem, FakeTos_data, TosSize);
+
+	return pFakeTosMem;
+}
+
+/**
+ * Load TOS Rom image file into ST memory space and fix image so it can be
+ * emulated correctly.  Pre TOS 1.06 are loaded at 0xFC0000 and later ones
+ * at 0xE00000.
+ *
+ * Return zero if all OK, non-zero value for error.
+ */
+int TOS_InitImage(void)
+{
+	uint8_t *pTosFile = NULL;
+	Uint32 logopatch_addr = 0;
+
+	bTosImageLoaded = false;
+
+	/* Calculate initial end of RAM */
+	STRamEnd = ConfigureParams.Memory.STRamSize_KB * 1024;
+
+	if (bUseTos)
+	{
+		pTosFile = TOS_LoadImage();
+		if (!pTosFile)
+			return -1;
+	}
 	else
-		STRamEnd = 0x80000;   /* 512 KiB */
+	{
+		pTosFile = TOS_FakeRomForTesting();
+		if (!pTosFile)
+			return -1;
+	}
+
+	/* After TOS is loaded, and machine configuration adapted
+	 * accordingly, memory amount can be corrected to a valid
+	 * machine specific value
+	 */
+	STRamEnd = STMemory_CorrectSTRamSize();
 
 	/* (Re-)Initialize the memory banks: */
 	memory_uninit();
-	memory_init(STRamEnd, 0, TosAddress);
+	memory_init(STRamEnd, ConfigureParams.Memory.TTRamSize_KB*1024, TosAddress);
 
 	/* Clear Upper memory (ROM and IO memory) */
 	memset(&RomMem[0xe00000], 0, 0x200000);
 
-	/* Copy loaded image into ST memory */
-	memcpy(&RomMem[TosAddress], pTosFile, TosSize);
+	/* Copy loaded image into memory */
+	if (bRamTosImage)
+		memcpy(&STRam[TosAddress], pTosFile, TosSize);
+	else
+		memcpy(&RomMem[TosAddress], pTosFile, TosSize);
+	free(pTosFile);
+	pTosFile = NULL;
 
 	Log_Printf(LOG_DEBUG, "Loaded TOS version %i.%c%c, starting at $%x, "
 	           "country code = %i, %s\n", TosVersion>>8, '0'+((TosVersion>>4)&0x0f),
@@ -660,32 +1164,76 @@ int TOS_LoadImage(void)
 	           (STMemory_ReadWord(TosAddress+28)&1)?"PAL":"NTSC");
 
 	/* Are we allowed VDI under this TOS? */
-	if (TosVersion == 0x0100 && bUseVDIRes)
+	if (bUseVDIRes)
 	{
-		/* Warn user */
-		Log_AlertDlg(LOG_ERROR, "To use extended VDI resolutions, you must select a TOS >= 1.02.");
-		/* And select non VDI */
-		bUseVDIRes = ConfigureParams.Screen.bUseExtVdiResolutions = false;
+		if (TosVersion == 0x0100)
+		{
+			/* Warn user */
+			Log_AlertDlg(LOG_ERROR, "To use extended VDI resolutions, you must select a TOS >= 1.02.");
+			/* And select non VDI */
+			bUseVDIRes = ConfigureParams.Screen.bUseExtVdiResolutions = false;
+		}
+		else
+		{
+			/* needs to be called after TosVersion is set, but
+			 * before STMemory_SetDefaultConfig() is called
+			 */
+			VDI_SetResolution(ConfigureParams.Screen.nVdiColors,
+					  ConfigureParams.Screen.nVdiWidth,
+					  ConfigureParams.Screen.nVdiHeight);
+		}
 	}
 
 	/* Fix TOS image, modify code for emulation */
-	if (ConfigureParams.Rom.bPatchTos && !bIsEmuTOS)
+	if (ConfigureParams.Rom.bPatchTos && !bIsEmuTOS && bUseTos)
 	{
-		TOS_FixRom();
+		TOS_FixRom(&logopatch_addr);
 	}
 	else
 	{
 		Log_Printf(LOG_DEBUG, "Skipped TOS patches.\n");
 	}
 
-	/* Set connected devices, memory configuration, etc. */
+	/*
+	 * patch some values into the "Draw logo" patch.
+	 * Needs to be called after final VDI resolution has been determined.
+	 */
+	if (logopatch_addr != 0)
+	{
+		STMemory_WriteWord(logopatch_addr + 2, VDIPlanes);
+		STMemory_WriteLong(logopatch_addr + 6, VDIWidth * VDIPlanes / 8);
+	}
+
+	/* Set rest of machine memory configuration, connected devices, etc. */
 	STMemory_SetDefaultConfig();
 
-	/* and free loaded image */
-	free(pTosFile);
+	if (bUseLilo)
+	{
+		TosSize = 0;
+		/* load linux */
+		if (!lilo_init())
+			return -1;
+	}
+	else if (!bUseTos)
+	{
+		/* Load test program (has to be done after memory has been cleared) */
+		if (psTestPrg)
+		{
+			Log_Printf(LOG_DEBUG, "Loading '%s' to 0x%x.\n",
+			           psTestPrg, TEST_PRG_START);
+			if (GemDOS_LoadAndReloc(psTestPrg, TEST_PRG_BASEPAGE, true))
+			{
+				fprintf(stderr, "Failed to load '%s'\n", psTestPrg);
+				exit(1);
+			}
+		}
+		else
+		{
+			/* Jump to same address again */
+			STMemory_WriteLong(TEST_PRG_START, 0x4ef80000 | TEST_PRG_START);
+		}
+	}
 
 	bTosImageLoaded = true;
-	TOS_CreateAutoInf();
-
 	return 0;
 }

@@ -6,11 +6,13 @@
 
   DIM disk image support.
 */
-const char DIM_fileid[] = "Hatari dim.c : " __DATE__ " " __TIME__;
-
-#include <zlib.h>
+const char DIM_fileid[] = "Hatari dim.c";
 
 #include "main.h"
+#if HAVE_ZLIB_H
+#include <zlib.h>
+#endif
+
 #include "file.h"
 #include "floppy.h"
 #include "dim.h"
@@ -66,7 +68,7 @@ Uint8 *DIM_ReadDisk(int Drive, const char *pszFileName, long *pImageSize, int *p
 	Uint8 *pDiskBuffer = NULL;
 
 	/* Load file into buffer */
-	pDimFile = HFile_Read(pszFileName, pImageSize, NULL);
+	pDimFile = File_Read(pszFileName, pImageSize, NULL);
 	if (pDimFile)
 	{
 		/* Check header for valid image: */

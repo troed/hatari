@@ -1,25 +1,27 @@
 /*
  * Hatari - profiledsp.c
  * 
- * Copyright (C) 2010-2013 by Eero Tamminen
+ * Copyright (C) 2010-2019 by Eero Tamminen
  *
  * This file is distributed under the GNU General Public License, version 2
  * or at your option any later version. Read the file gpl.txt for details.
  *
  * profiledsp.c - functions for profiling DSP and showing the results.
  */
-const char Profiledsp_fileid[] = "Hatari profiledsp.c : " __DATE__ " " __TIME__;
+const char Profiledsp_fileid[] = "Hatari profiledsp.c";
 
 #include <stdio.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <assert.h>
 #include "main.h"
 #include "configuration.h"
 #include "clocks_timings.h"
 #include "dsp.h"
+#include "symbols.h"
 #include "profile.h"
 #include "profile_priv.h"
-#include "symbols.h"
+#include "debug_priv.h"
 /* for VBL info */
 #include "screen.h"
 #include "video.h"
@@ -102,7 +104,7 @@ void Profile_DspShowStats(void)
 	 */
 	fprintf(stderr, "- sum of per instruction cycle changes\n"
 		"  (can indicate code change during profiling):\n  %"PRIu64"\n",
-		area->counters.misses);
+		area->counters.cycles_diffs);
 
 	fprintf(stderr, "- used cycles:\n  %"PRIu64"\n",
 		area->counters.cycles);
@@ -116,9 +118,9 @@ void Profile_DspShowStats(void)
  * Show DSP instructions which execution was profiled, in the address order,
  * starting from the given address.  Return next disassembly address.
  */
-Uint16 Profile_DspShowAddresses(Uint32 addr, Uint32 upper, FILE *out)
+Uint16 Profile_DspShowAddresses(Uint32 addr, Uint32 upper, FILE *out, paging_t use_paging)
 {
-	int show, shown, active;
+	int show, shown, addrs, active;
 	dsp_profile_item_t *data;
 	Uint16 nextpc;
 	Uint32 end;
@@ -136,32 +138,42 @@ Uint16 Profile_DspShowAddresses(Uint32 addr, Uint32 upper, FILE *out)
 		if (upper < end) {
 			end = upper;
 		}
-		show = active;
-	} else {
-		show = ConfigureParams.Debugger.nDisasmLines;
-		if (!show || show > active) {
-			show = active;
+	}
+	show = INT_MAX;
+	if (use_paging == PAGING_ENABLED) {
+		show = DebugUI_GetPageLines(ConfigureParams.Debugger.nDisasmLines, 0);
+		if (!show) {
+			show = INT_MAX;
 		}
 	}
 
 	fputs("# disassembly with profile data: <instructions percentage>% (<sum of instructions>, <sum of cycles>, <max cycle difference>)\n", out);
+	shown = 2; /* first and last printf */
 
-	nextpc = 0;
-	for (shown = 0; shown < show && addr < end; addr++) {
+	addrs = nextpc = 0;
+	for (; shown < show && addrs < active && addr < end; addr++) {
 		if (!data[addr].count) {
 			continue;
 		}
 		if (addr != nextpc && nextpc) {
 			fputs("[...]\n", out);
+			shown++;
 		}
-		symbol = Symbols_GetByDspAddress(addr);
+		symbol = Symbols_GetByDspAddress(addr, SYMTYPE_TEXT);
 		if (symbol) {
 			fprintf(out, "%s:\n", symbol);
+			shown++;
 		}
 		nextpc = DSP_DisasmAddress(out, addr, addr);
+		addrs++;
 		shown++;
 	}
-	printf("Disassembled %d (of active %d) DSP addresses.\n", shown, active);
+	if (addr < end) {
+		printf("Disassembled %d (of active %d) DSP addresses.\n", addrs, active);
+	} else {
+		printf("Disassembled last %d (of active %d) DSP addresses, wrapping...\n", addrs, active);
+		nextpc = 0;
+	}
 	return nextpc;
 }
 
@@ -270,7 +282,7 @@ void Profile_DspShowCounts(int show, bool only_symbols)
 		return;
 	}
 
-	symbols = Symbols_DspCount();
+	symbols = Symbols_DspCodeCount();
 	if (!symbols) {
 		fprintf(stderr, "ERROR: no DSP symbols loaded!\n");
 		return;
@@ -281,7 +293,7 @@ void Profile_DspShowCounts(int show, bool only_symbols)
 	for (end = sort_arr + active; sort_arr < end; sort_arr++) {
 
 		addr = *sort_arr;
-		name = Symbols_GetByDspAddress(addr);
+		name = Symbols_GetByDspAddress(addr, SYMTYPE_TEXT);
 		if (!name) {
 			continue;
 		}
@@ -303,7 +315,7 @@ void Profile_DspShowCounts(int show, bool only_symbols)
 static const char * addr2name(Uint32 addr, Uint64 *total)
 {
 	*total = dsp_profile.data[addr].count;
-	return Symbols_GetByDspAddress(addr);
+	return Symbols_GetByDspAddress(addr, SYMTYPE_TEXT);
 }
 
 /**
@@ -328,7 +340,7 @@ void Profile_DspSave(FILE *out)
 	 * p:0202  0aa980 000200  (07 cyc)  jclr #0,x:$ffe9,p:$0200  0.00% (6, 42)
 	 */
 	fputs("Field regexp:\t^p:([0-9a-f]+) .*% \\((.*)\\)$\n", out);
-	Profile_DspShowAddresses(0, DSP_PROFILE_ARR_SIZE, out);
+	Profile_DspShowAddresses(0, DSP_PROFILE_ARR_SIZE, out, PAGING_DISABLED);
 	Profile_DspShowCallers(out);
 }
 
@@ -365,7 +377,7 @@ bool Profile_DspStart(void)
 	printf("Allocated DSP profile buffer (%d KB).\n",
 	       (int)sizeof(*dsp_profile.data)*DSP_PROFILE_ARR_SIZE/1024);
 
-	Profile_AllocCallinfo(&(dsp_callinfo), Symbols_DspCount(), "DSP");
+	Profile_AllocCallinfo(&(dsp_callinfo), Symbols_DspCodeCount(), "DSP");
 
 	item = dsp_profile.data;
 	for (i = 0; i < DSP_PROFILE_ARR_SIZE; i++, item++) {
@@ -447,7 +459,7 @@ static calltype_t dsp_opcode_type(Uint16 prev_pc, Uint16 pc)
 	 */
 
 	/* TODO: exception invocation.
-	 * Could be detected by PC going through low interrupt vector adresses,
+	 * Could be detected by PC going through low interrupt vector addresses,
 	 * but fast-calls using JSR/RTS would need separate handling.
 	 */
 	if (0) {	/* TODO */
@@ -515,11 +527,11 @@ static void collect_calls(Uint16 pc, counters_t *counters)
 	}
 
 	/* address is one which we're tracking? */
-	idx = Symbols_GetDspAddressIndex(pc);
+	idx = Symbols_GetDspCodeIndex(pc);
 	if (unlikely(idx >= 0)) {
 
 		flag = dsp_opcode_type(prev_pc, pc);
-		if (flag == CALL_SUBROUTINE) {
+		if (likely(flag == CALL_SUBROUTINE || flag == CALL_EXCEPTION)) {
 			dsp_callinfo.return_pc = DSP_GetNextPC(prev_pc);  /* slow! */
 		} else if (caller_pc != PC_UNDEFINED) {
 			/* returned from function, change return
@@ -636,7 +648,7 @@ static void update_area_item(profile_area_t *area, Uint16 addr, dsp_profile_item
 
 	area->counters.count += count;
 	area->counters.cycles += cycles;
-	area->counters.misses += diff;
+	area->counters.cycles_diffs += diff;
 
 	if (addr < area->lowest) {
 		area->lowest = addr;
@@ -666,7 +678,11 @@ void Profile_DspStop(void)
 		fflush(profile_loop.fp);
 	}
 
-	Profile_FinalizeCalls(&(dsp_callinfo), &(dsp_profile.ram.counters), Symbols_GetByDspAddress);
+	Profile_FinalizeCalls(DSP_GetPC(),
+			      &(dsp_callinfo),
+			      &(dsp_profile.ram.counters),
+			      Symbols_GetByDspAddress,
+			      Symbols_GetBeforeDspAddress);
 
 	/* find lowest and highest  addresses executed */
 	area = &dsp_profile.ram;
@@ -718,8 +734,10 @@ void Profile_DspGetPointers(bool **enabled, Uint32 **disasm_addr)
 /**
  * Get callinfo & symbol search pointers for stack walking.
  */
-void Profile_DspGetCallinfo(callinfo_t **callinfo, const char* (**get_symbol)(Uint32))
+void Profile_DspGetCallinfo(callinfo_t **callinfo, const char* (**get_caller)(Uint32*),
+			    const char* (**get_symbol)(Uint32, symtype_t))
 {
 	*callinfo = &(dsp_callinfo);
+	*get_caller = Symbols_GetBeforeDspAddress;
 	*get_symbol = Symbols_GetByDspAddress;
 }

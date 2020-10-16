@@ -25,8 +25,10 @@ extern bool	Avi_RecordVideoStream ( void );
 extern bool	Avi_RecordAudioStream ( Sint16 pSamples[][2] , int SampleIndex , int SampleLength );
 
 extern bool	Avi_AreWeRecording ( void );
+extern bool	Avi_SetCompressionLevel(const char *str);
 extern bool	Avi_StartRecording ( char *FileName , bool CropGui , Uint32 Fps , Uint32 Fps_scale , int VideoCodec );
 extern bool	Avi_StopRecording ( void );
+extern void	Avi_SetSurface(SDL_Surface *surf);
 
 
 #endif /* ifndef HATARI_AVI_RECORD_H */

@@ -11,25 +11,30 @@
   We need to intercept the initial Line-A call (which we force into the TOS on
   boot-up) and also the init calls to the VDI.
 */
-const char VDI_fileid[] = "Hatari vdi.c : " __DATE__ " " __TIME__;
+const char VDI_fileid[] = "Hatari vdi.c";
 
 #include "main.h"
+#include "configuration.h"
 #include "file.h"
 #include "gemdos.h"
+#include "inffile.h"
 #include "m68000.h"
+#include "options.h"
 #include "screen.h"
 #include "stMemory.h"
+#include "tos.h"
+#include "vars.h"
 #include "vdi.h"
 #include "video.h"
-#include "configuration.h"
 
+#define DEBUG 0
 
 Uint32 VDI_OldPC;                  /* When call Trap#2, store off PC */
 
 bool bVdiAesIntercept = false;     /* Set to true to trace VDI & AES calls */
 bool bUseVDIRes = false;           /* Set to true (if want VDI), or false (ie for games) */
 /* defaults */
-int VDIRes = 0;                    /* 0,1 or 2 (low, medium, high) */
+int VDIRes = ST_LOW_RES;           /* used in screen.c */
 int VDIWidth = 640;                /* 640x480, 800x600 or 1024x768 */
 int VDIHeight = 480;
 int VDIPlanes = 4;
@@ -57,101 +62,6 @@ static Uint16 AESOpCode;
 
 
 /*-----------------------------------------------------------------------*/
-/* Desktop TOS 1.04 and TOS 2.06 desktop configuration files */
-static const Uint8 DesktopScript[504] =
-{
-	0x23,0x61,0x30,0x30,0x30,0x30,0x30,0x30,0x0D,0x0A,0x23,0x62,0x30,0x30,0x30,0x30,
-	0x30,0x30,0x0D,0x0A,0x23,0x63,0x37,0x37,0x37,0x30,0x30,0x30,0x37,0x30,0x30,0x30,
-	0x36,0x30,0x30,0x30,0x37,0x30,0x30,0x35,0x35,0x32,0x30,0x30,0x35,0x30,0x35,0x35,
-	0x35,0x32,0x32,0x32,0x30,0x37,0x37,0x30,0x35,0x35,0x37,0x30,0x37,0x35,0x30,0x35,
-	0x35,0x35,0x30,0x37,0x37,0x30,0x33,0x31,0x31,0x31,0x31,0x30,0x33,0x0D,0x0A,0x23,
-	0x64,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
-	0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
-	0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x0D,0x0A,
-	0x23,0x45,0x20,0x31,0x38,0x20,0x31,0x31,0x20,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,
-	0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x37,0x20,0x32,0x36,0x20,0x30,0x43,0x20,
-	0x30,0x30,0x20,0x40,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,
-	0x32,0x20,0x30,0x42,0x20,0x32,0x36,0x20,0x30,0x39,0x20,0x30,0x30,0x20,0x40,0x0D,
-	0x0A,0x23,0x57,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x41,0x20,0x30,0x46,0x20,
-	0x31,0x41,0x20,0x30,0x39,0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,0x23,0x57,0x20,0x30,
-	0x30,0x20,0x30,0x30,0x20,0x30,0x45,0x20,0x30,0x31,0x20,0x31,0x41,0x20,0x30,0x39,
-	0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,0x23,0x4D,0x20,0x30,0x31,0x20,0x30,0x30,0x20,
-	0x30,0x30,0x20,0x46,0x46,0x20,0x43,0x20,0x48,0x41,0x52,0x44,0x20,0x44,0x49,0x53,
-	0x4B,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x4D,0x20,0x30,0x30,0x20,0x30,0x30,0x20,
-	0x30,0x30,0x20,0x46,0x46,0x20,0x41,0x20,0x46,0x4C,0x4F,0x50,0x50,0x59,0x20,0x44,
-	0x49,0x53,0x4B,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x4D,0x20,0x30,0x30,0x20,0x30,
-	0x31,0x20,0x30,0x30,0x20,0x46,0x46,0x20,0x42,0x20,0x46,0x4C,0x4F,0x50,0x50,0x59,
-	0x20,0x44,0x49,0x53,0x4B,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x54,0x20,0x30,0x30,
-	0x20,0x30,0x33,0x20,0x30,0x32,0x20,0x46,0x46,0x20,0x20,0x20,0x54,0x52,0x41,0x53,
-	0x48,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x46,0x20,0x46,0x46,0x20,0x30,0x34,0x20,
-	0x20,0x20,0x40,0x20,0x2A,0x2E,0x2A,0x40,0x20,0x0D,0x0A,0x23,0x44,0x20,0x46,0x46,
-	0x20,0x30,0x31,0x20,0x20,0x20,0x40,0x20,0x2A,0x2E,0x2A,0x40,0x20,0x0D,0x0A,0x23,
-	0x47,0x20,0x30,0x33,0x20,0x46,0x46,0x20,0x20,0x20,0x2A,0x2E,0x41,0x50,0x50,0x40,
-	0x20,0x40,0x20,0x0D,0x0A,0x23,0x47,0x20,0x30,0x33,0x20,0x46,0x46,0x20,0x20,0x20,
-	0x2A,0x2E,0x50,0x52,0x47,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x50,0x20,0x30,0x33,
-	0x20,0x46,0x46,0x20,0x20,0x20,0x2A,0x2E,0x54,0x54,0x50,0x40,0x20,0x40,0x20,0x0D,
-	0x0A,0x23,0x46,0x20,0x30,0x33,0x20,0x30,0x34,0x20,0x20,0x20,0x2A,0x2E,0x54,0x4F,
-	0x53,0x40,0x20,0x40,0x20,0x0D,0x0A,0x1A
-};
-
-static const Uint8 NewDeskScript[786] =
-{
-	0x23,0x61,0x30,0x30,0x30,0x30,0x30,0x30,0x0D,0x0A,0x23,0x62,0x30,0x30,0x30,0x30,
-	0x30,0x30,0x0D,0x0A,0x23,0x63,0x37,0x37,0x37,0x30,0x30,0x30,0x37,0x30,0x30,0x30,
-	0x36,0x30,0x30,0x30,0x37,0x30,0x30,0x35,0x35,0x32,0x30,0x30,0x35,0x30,0x35,0x35,
-	0x35,0x32,0x32,0x32,0x30,0x37,0x37,0x30,0x35,0x35,0x37,0x30,0x37,0x35,0x30,0x35,
-	0x35,0x35,0x30,0x37,0x37,0x30,0x33,0x31,0x31,0x31,0x31,0x30,0x33,0x0D,0x0A,0x23,
-	0x64,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
-	0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
-	0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x0D,0x0A,
-	0x23,0x4B,0x20,0x34,0x46,0x20,0x35,0x33,0x20,0x34,0x43,0x20,0x30,0x30,0x20,0x34,
-	0x36,0x20,0x34,0x32,0x20,0x34,0x33,0x20,0x35,0x37,0x20,0x34,0x35,0x20,0x35,0x38,
-	0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,
-	0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,
-	0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x35,0x32,0x20,0x30,0x30,0x20,0x30,0x30,
-	0x20,0x34,0x44,0x20,0x35,0x36,0x20,0x35,0x30,0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,
-	0x23,0x45,0x20,0x31,0x38,0x20,0x30,0x31,0x20,0x30,0x30,0x20,0x30,0x36,0x20,0x0D,
-	0x0A,0x23,0x51,0x20,0x34,0x31,0x20,0x34,0x30,0x20,0x34,0x33,0x20,0x34,0x30,0x20,
-	0x34,0x33,0x20,0x34,0x30,0x20,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,0x20,0x30,0x30,
-	0x20,0x30,0x30,0x20,0x30,0x37,0x20,0x32,0x36,0x20,0x30,0x43,0x20,0x30,0x30,0x20,
-	0x40,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x32,0x20,0x30,
-	0x42,0x20,0x32,0x36,0x20,0x30,0x39,0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,0x23,0x57,
-	0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x41,0x20,0x30,0x46,0x20,0x31,0x41,0x20,
-	0x30,0x39,0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,0x20,0x30,
-	0x30,0x20,0x30,0x45,0x20,0x30,0x31,0x20,0x31,0x41,0x20,0x30,0x39,0x20,0x30,0x30,
-	0x20,0x40,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x34,0x20,
-	0x30,0x37,0x20,0x32,0x36,0x20,0x30,0x43,0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,0x23,
-	0x57,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x43,0x20,0x30,0x42,0x20,0x32,0x36,
-	0x20,0x30,0x39,0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,0x20,
-	0x30,0x30,0x20,0x30,0x38,0x20,0x30,0x46,0x20,0x31,0x41,0x20,0x30,0x39,0x20,0x30,
-	0x30,0x20,0x40,0x0D,0x0A,0x23,0x57,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x36,
-	0x20,0x30,0x31,0x20,0x31,0x41,0x20,0x30,0x39,0x20,0x30,0x30,0x20,0x40,0x0D,0x0A,
-	0x23,0x4E,0x20,0x46,0x46,0x20,0x30,0x34,0x20,0x30,0x30,0x30,0x20,0x40,0x20,0x2A,
-	0x2E,0x2A,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x44,0x20,0x46,0x46,0x20,0x30,0x31,
-	0x20,0x30,0x30,0x30,0x20,0x40,0x20,0x2A,0x2E,0x2A,0x40,0x20,0x40,0x20,0x0D,0x0A,
-	0x23,0x47,0x20,0x30,0x33,0x20,0x46,0x46,0x20,0x30,0x30,0x30,0x20,0x2A,0x2E,0x41,
-	0x50,0x50,0x40,0x20,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x47,0x20,0x30,0x33,0x20,
-	0x46,0x46,0x20,0x30,0x30,0x30,0x20,0x2A,0x2E,0x50,0x52,0x47,0x40,0x20,0x40,0x20,
-	0x40,0x20,0x0D,0x0A,0x23,0x59,0x20,0x30,0x33,0x20,0x46,0x46,0x20,0x30,0x30,0x30,
-	0x20,0x2A,0x2E,0x47,0x54,0x50,0x40,0x20,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x50,
-	0x20,0x30,0x33,0x20,0x46,0x46,0x20,0x30,0x30,0x30,0x20,0x2A,0x2E,0x54,0x54,0x50,
-	0x40,0x20,0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x46,0x20,0x30,0x33,0x20,0x30,0x34,
-	0x20,0x30,0x30,0x30,0x20,0x2A,0x2E,0x54,0x4F,0x53,0x40,0x20,0x40,0x20,0x40,0x20,
-	0x0D,0x0A,0x23,0x4D,0x20,0x30,0x30,0x20,0x30,0x31,0x20,0x30,0x30,0x20,0x46,0x46,
-	0x20,0x43,0x20,0x48,0x41,0x52,0x44,0x20,0x44,0x49,0x53,0x4B,0x40,0x20,0x40,0x20,
-	0x0D,0x0A,0x23,0x4D,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x30,0x30,0x20,0x46,0x46,
-	0x20,0x41,0x20,0x46,0x4C,0x4F,0x50,0x50,0x59,0x20,0x44,0x49,0x53,0x4B,0x40,0x20,
-	0x40,0x20,0x0D,0x0A,0x23,0x4D,0x20,0x30,0x31,0x20,0x30,0x30,0x20,0x30,0x30,0x20,
-	0x46,0x46,0x20,0x42,0x20,0x46,0x4C,0x4F,0x50,0x50,0x59,0x20,0x44,0x49,0x53,0x4B,
-	0x40,0x20,0x40,0x20,0x0D,0x0A,0x23,0x54,0x20,0x30,0x30,0x20,0x30,0x33,0x20,0x30,
-	0x32,0x20,0x46,0x46,0x20,0x20,0x20,0x54,0x52,0x41,0x53,0x48,0x40,0x20,0x40,0x20,
-	0x0D,0x0A
-};
-
-static void VDI_FixDesktopInf(void);
-
-
-/*-----------------------------------------------------------------------*/
 /**
  * Called to reset VDI variables on reset.
  */
@@ -159,28 +69,6 @@ void VDI_Reset(void)
 {
 	/* no VDI calls in progress */
 	VDI_OldPC = 0;
-}
-
-/*-----------------------------------------------------------------------*/
-/**
- * Returns given value after constraining it within "min" and "max" values
- * and making it evenly divisable by "align"
- */
-int VDI_Limit(int value, int align, int min, int max)
-{
-	value = (value/align)*align;
-	if (value > max)
-	{
-		/* align down */
-		return (max/align)*align;
-	}
-	if (value < min)
-	{
-		/* align up */
-		min += align-1;
-		return (min/align)*align;
-	}
-	return value;
 }
 
 /*-----------------------------------------------------------------------*/
@@ -204,8 +92,10 @@ static bool VDI_ByteLimit(int *width, int *height, int planes)
 	{
 		*width = MIN_VDI_WIDTH;
 		*height = MIN_VDI_HEIGHT;
-		fputs("Bad VDI screen ratio / too small size -> use smallest valid size.\n", stderr);
+		Log_Printf(LOG_WARN, "Bad VDI screen ratio / too small size -> use smallest valid size.\n");
 	}
+	else
+		Log_Printf(LOG_WARN, "VDI screen size limited to <= %dKB\n", MAX_VDI_BYTES/1024);
 	return true;
 }
 
@@ -223,31 +113,45 @@ void VDI_SetResolution(int GEMColor, int WidthRequest, int HeightRequest)
 	switch (GEMColor)
 	{
 	 case GEMCOLOR_2:
-		VDIRes = 2;
+		VDIRes = ST_HIGH_RES;
 		VDIPlanes = 1;
 		break;
 	 case GEMCOLOR_4:
-		VDIRes = 1;
+		VDIRes = ST_MEDIUM_RES;
 		VDIPlanes = 2;
 		break;
 	 case GEMCOLOR_16:
-		VDIRes = 0;
+		VDIRes = ST_LOW_RES;
 		VDIPlanes = 4;
 		break;
 	}
 	/* screen size in bytes needs to be below limit */
 	VDI_ByteLimit(&w, &h, VDIPlanes);
 
+#if DEBUG
+	printf("%s v0x%04x, RAM=%dkB\n", bIsEmuTOS ? "EmuTOS" : "TOS", TosVersion,  ConfigureParams.Memory.STRamSize_KB);
+#endif
 	/* width needs to be aligned to 16 bytes */
-	VDIWidth = VDI_Limit(w, 128/VDIPlanes, MIN_VDI_WIDTH, MAX_VDI_WIDTH);
+	VDIWidth = Opt_ValueAlignMinMax(w, 128/VDIPlanes, MIN_VDI_WIDTH, MAX_VDI_WIDTH);
+
 	/* height needs to be multiple of cell height (either 8 or 16) */
-	VDIHeight = VDI_Limit(h, 16, MIN_VDI_HEIGHT, MAX_VDI_HEIGHT);
+	VDIHeight = Opt_ValueAlignMinMax(h, 16, MIN_VDI_HEIGHT, MAX_VDI_HEIGHT);
 
-	printf("VDI screen: request = %dx%d@%d, result = %dx%d@%d\n",
-	       WidthRequest, HeightRequest, VDIPlanes, VDIWidth, VDIHeight, VDIPlanes);
-
-	/* Write resolution to re-boot takes effect with correct bit-depth */
-	VDI_FixDesktopInf();
+	if (w != VDIWidth || h != VDIHeight)
+	{
+		Log_Printf(LOG_WARN, "VDI screen: request = %dx%d@%d, result = %dx%d@%d\n",
+		       WidthRequest, HeightRequest, VDIPlanes, VDIWidth, VDIHeight, VDIPlanes);
+	}
+	else
+	{
+		Log_Printf(LOG_DEBUG, "VDI screen: %dx%d@%d\n",
+			   VDIWidth, VDIHeight, VDIPlanes);
+	}
+	if (bUseVDIRes)
+	{
+		/* INF file overriding so that (re-)boot uses correct bit-depth */
+		INF_SetVdiMode(VDIRes);
+	}
 }
 
 
@@ -402,7 +306,7 @@ static const char* AESName_10[] = {
 static const char* AES_Opcode2Name(Uint16 opcode)
 {
 	int code = opcode - 10;
-	if (code >= 0 && code < ARRAYSIZE(AESName_10) && AESName_10[code])
+	if (code >= 0 && code < ARRAY_SIZE(AESName_10) && AESName_10[code])
 		return AESName_10[code];
 	else
 		return "???";
@@ -415,7 +319,7 @@ static void AES_OpcodeInfo(FILE *fp, Uint16 opcode)
 {
 	int code = opcode - 10;
 	fprintf(fp, "AES call %3hd ", opcode);
-	if (code >= 0 && code < ARRAYSIZE(AESName_10) && AESName_10[code])
+	if (code >= 0 && code < ARRAY_SIZE(AESName_10) && AESName_10[code])
 	{
 		bool first = true;
 		int i, items;
@@ -424,7 +328,7 @@ static void AES_OpcodeInfo(FILE *fp, Uint16 opcode)
 
 		items = 0;
 		/* there are so few of these that linear search is fine */
-		for (i = 0; i < ARRAYSIZE(AESStrings); i++)
+		for (i = 0; i < ARRAY_SIZE(AESStrings); i++)
 		{
 			/* something that can be shown? */
 			if (AESStrings[i].code == opcode)
@@ -444,7 +348,7 @@ static void AES_OpcodeInfo(FILE *fp, Uint16 opcode)
 					first = false;
 				else
 					fputs(", ", fp);
-				str = (const char *)STRAM_ADDR(STMemory_ReadLong(AESAddrin+SIZE_LONG*i));
+				str = (const char *)STMemory_STAddrToPointer(STMemory_ReadLong(AESAddrin+SIZE_LONG*i));
 				fprintf(fp, "\"%s\"", str);
 			}
 		}
@@ -475,10 +379,32 @@ static void AES_OpcodeInfo(FILE *fp, Uint16 opcode)
 }
 
 /**
+ * Verify given VDI table pointer and store variables from
+ * it for later use. Return true for success
+ */
+static bool AES_StoreVars(Uint32 TablePtr)
+{
+	if (!STMemory_CheckAreaType(TablePtr, 24, ABFLAG_RAM))
+	{
+		Log_Printf(LOG_WARN, "AES param store failed due to invalid parameter block address 0x%x+%i\n", TablePtr, 24);
+		return false;
+	}
+	/* store values for debugger "info aes" command */
+	AESControl = STMemory_ReadLong(TablePtr);
+	AESGlobal  = STMemory_ReadLong(TablePtr+4);
+	AESIntin   = STMemory_ReadLong(TablePtr+8);
+	AESIntout  = STMemory_ReadLong(TablePtr+12);
+	AESAddrin  = STMemory_ReadLong(TablePtr+16);
+	AESAddrout = STMemory_ReadLong(TablePtr+20);
+	AESOpCode  = STMemory_ReadWord(AESControl);
+	return true;
+}
+
+/**
  * If opcodes argument is set, show AES opcode/function name table,
  * otherwise AES vectors information.
  */
-void AES_Info(Uint32 bShowOpcodes)
+void AES_Info(FILE *fp, Uint32 bShowOpcodes)
 {
 	Uint16 opcode;
 	
@@ -486,42 +412,51 @@ void AES_Info(Uint32 bShowOpcodes)
 	{
 		for (opcode = 10; opcode < 0x86; opcode++)
 		{
-			fprintf(stderr, "%02x %-16s", opcode, AES_Opcode2Name(opcode));
-			if ((opcode-9) % 4 == 0) fputs("\n", stderr);
+			fprintf(fp, "%02x %-16s", opcode, AES_Opcode2Name(opcode));
+			if ((opcode-9) % 4 == 0) fputs("\n", fp);
 		}
 		return;
 	}
-	if (!bVdiAesIntercept)
+	opcode = Vars_GetAesOpcode();
+	if (opcode != INVALID_OPCODE)
 	{
-		fputs("VDI/AES interception isn't enabled!\n", stderr);
-		return;
+		if (!AES_StoreVars(Regs[REG_D1]))
+			return;
 	}
-	if (!AESControl)
+	else
 	{
-		fputs("No traced AES calls!\n", stderr);
-		return;
+		if (!bVdiAesIntercept)
+		{
+			fputs("VDI/AES interception isn't enabled!\n", fp);
+			return;
+		}
+		if (!AESControl)
+		{
+			fputs("No traced AES calls!\n", fp);
+			return;
+		}
+		opcode = STMemory_ReadWord(AESControl);
 	}
-	opcode = STMemory_ReadWord(AESControl);
 	if (opcode != AESOpCode)
 	{
-		fputs("AES parameter block contents changed since last call!\n", stderr);
+		fputs("AES parameter block contents changed since last call!\n", fp);
 		return;
 	}
 
-	fputs("Latest AES Parameter block:\n", stderr);
-	fprintf(stderr, "- Opcode: %3hd (%s)\n",
+	fputs("Latest AES Parameter block:\n", fp);
+	fprintf(fp, "- Opcode: %3hd (%s)\n",
 		opcode, AES_Opcode2Name(opcode));
 
-	fprintf(stderr, "- Control: %#8x\n", AESControl);
-	fprintf(stderr, "- Global:  %#8x, %d bytes\n",
+	fprintf(fp, "- Control: %#8x\n", AESControl);
+	fprintf(fp, "- Global:  %#8x, %d bytes\n",
 		AESGlobal, 2+2+2+4+4+4+4+4+4);
-	fprintf(stderr, "- Intin:   %#8x, %d words\n",
+	fprintf(fp, "- Intin:   %#8x, %d words\n",
 		AESIntin, STMemory_ReadWord(AESControl+2*1));
-	fprintf(stderr, "- Intout:  %#8x, %d words\n",
+	fprintf(fp, "- Intout:  %#8x, %d words\n",
 		AESIntout, STMemory_ReadWord(AESControl+2*2));
-	fprintf(stderr, "- Addrin:  %#8x, %d longs\n",
+	fprintf(fp, "- Addrin:  %#8x, %d longs\n",
 		AESAddrin, STMemory_ReadWord(AESControl+2*3));
-	fprintf(stderr, "- Addrout: %#8x, %d longs\n",
+	fprintf(fp, "- Addrout: %#8x, %d longs\n",
 		AESAddrout, STMemory_ReadWord(AESControl+2*4));
 }
 
@@ -531,8 +466,10 @@ void AES_Info(Uint32 bShowOpcodes)
 /**
  * Map VDI call opcode/sub-opcode to a VDI function name
  */
-static const char* VDI_Opcode2Name(Uint16 opcode, Uint16 subcode)
+static const char* VDI_Opcode2Name(Uint16 opcode, Uint16 subcode, Uint16 nintin, const char **extra_info)
 {
+	unsigned int i;
+
 	static const char* names_0[] = {
 		"???",
 		"v_opnwk",
@@ -608,8 +545,8 @@ static const char* VDI_Opcode2Name(Uint16 opcode, Uint16 subcode)
 		"vs_clip",
 		"vqt_name",
 		"vqt_fontinfo"
-		/* 131-233: no known opcodes
-		 * 234-255: (Speedo) GDOS opcodes
+		/* 139-169: no known opcodes
+		 * 170-255: NVDI/Speedo GDOS opcodes
 		 */
 	};
 	static const char* names_opcode5[] = {
@@ -640,13 +577,6 @@ static const char* VDI_Opcode2Name(Uint16 opcode, Uint16 subcode)
 		"vq_scan",
 		"v_alpha_text"
 	};
-	static const char* names_opcode5_98[] = {
-		"v_meta_extents",
-		"v_write_meta",
-		"vm_filename",
-		"???",
-		"v_fontinit"
-	};
 	static const char* names_opcode11[] = {
 		"<no subcode>",
 		"v_bar",
@@ -658,108 +588,286 @@ static const char* VDI_Opcode2Name(Uint16 opcode, Uint16 subcode)
 		"v_ellpie",
 		"v_rbox",
 		"v_rfbox",
-		"v_justified"
+		"v_justified",
+		"???",
+		"v_bez_on/off",
+	};
+	static struct {
+		unsigned short opcode;
+		unsigned short subcode;
+		unsigned short nintin;
+		const char *name;
+		const char *extra_info;
+	} const names_other[] = {
+		{ 5, 98, 0xffff, "v_meta_extents", "GDOS" },
+		{ 5, 99, 0xffff, "v_write_meta", "GDOS" },
+		{ 5, 100, 0xffff, "vm_filename", "GDOS" },
+		{ 5, 101, 0xffff, "v_offset", "GDOS" },
+		{ 5, 102, 0xffff, "v_fontinit", "GDOS" },
+		{ 100, 1, 13, "v_opnbm", "EdDI" },
+		{ 100, 2, 6, "v_resize_bm", "EdDI" },
+		{ 100, 3, 4, "v_open_bm", "EdDI" },
+		{ 100, 0xffff, 0xffff, "v_opnvwk", NULL },
+		{ 132, 0xffff, 0xffff, "vqt_justified", "PC/GEM" },
+		{ 133, 0xffff, 0xffff, "vs_grayoverride", "GEM/3" },
+		{ 134, 0xffff, 1, "v_pat_rotate", "GEM/3" },
+		{ 134, 0xffff, 0xffff, "vex_wheelv", "Milan" },
+		{ 138, 0xffff, 0xffff, "v_setrgb", "NVDI" },
+		{ 170, 0, 0xffff, "vr_transfer_bits" },
+		{ 171, 0, 0xffff, "vr_clip_rects_by_dst", "NVDI" }, /* NVDI 5.02 */
+		{ 171, 1, 0xffff, "vr_clip_rects_by_src", "NVDI" }, /* NVDI 5.02 */
+		{ 171, 2, 0xffff, "vr_clip_rects32_by_dst", "NVDI" }, /* NVDI 5.02 */
+		{ 171, 3, 0xffff, "vr_clip_rects32_by_src", "NVDI" }, /* NVDI 5.02 */
+		{ 180, 0, 0xffff, "v_create_driver_info", "NVDI" }, /* NVDI 5.00 */
+		{ 181, 0, 0xffff, "v_delete_driver_info", "NVDI" }, /* NVDI 5.00 */
+		{ 182, 0, 0xffff, "v_read_default_settings", "NVDI" }, /* NVDI 5.00 */
+		{ 182, 1, 0xffff, "v_write_default_settings", "NVDI" }, /* NVDI 5.00 */
+		{ 190, 0, 0xffff, "vqt_char_index", "GDOS" }, /* NVDI 4.00 */
+		{ 200, 0, 0xffff, "vst_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 200, 1, 0xffff, "vsf_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 200, 2, 0xffff, "vsl_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 200, 3, 0xffff, "vsm_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 200, 4, 0xffff, "vsr_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 201, 0, 0xffff, "vst_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 201, 1, 0xffff, "vsf_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 201, 2, 0xffff, "vsl_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 201, 3, 0xffff, "vsm_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 201, 4, 0xffff, "vsr_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 202, 0, 0xffff, "vqt_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 202, 1, 0xffff, "vqf_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 202, 2, 0xffff, "vql_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 202, 3, 0xffff, "vqm_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 202, 4, 0xffff, "vqr_fg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 203, 0, 0xffff, "vqt_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 203, 1, 0xffff, "vqf_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 203, 2, 0xffff, "vql_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 203, 3, 0xffff, "vqm_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 203, 4, 0xffff, "vqr_bg_color", "GDOS" }, /* NVDI 5.00 */
+		{ 204, 0, 0xffff, "v_color2value", "NVDI" }, /* NVDI 5.00 */
+		{ 204, 1, 0xffff, "v_value2color", "NVDI" }, /* NVDI 5.00 */
+		{ 204, 2, 0xffff, "v_color2nearest", "NVDI" }, /* NVDI 5.00 */
+		{ 204, 3, 0xffff, "vq_px_format", "NVDI" }, /* NVDI 5.00 */
+		{ 205, 0, 0xffff, "vs_ctab", "NVDI" }, /* NVDI 5.00 */
+		{ 205, 1, 0xffff, "vs_ctab_entry", "NVDI" }, /* NVDI 5.00 */
+		{ 205, 2, 0xffff, "vs_dflt_ctab", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 0, 0xffff, "vq_ctab", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 1, 0xffff, "vq_ctab_entry", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 2, 0xffff, "vq_ctab_id", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 3, 0xffff, "v_ctab_idx2vdi", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 4, 0xffff, "v_ctab_vdi2idx", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 5, 0xffff, "v_ctab_idx2value", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 6, 0xffff, "v_get_ctab_id", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 7, 0xffff, "vq_dflt_ctab", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 8, 0xffff, "v_create_ctab", "NVDI" }, /* NVDI 5.00 */
+		{ 206, 9, 0xffff, "v_delete_ctab", "NVDI" }, /* NVDI 5.00 */
+		{ 207, 0, 0xffff, "vs_hilite_color", "NVDI" }, /* NVDI 5.00 */
+		{ 207, 1, 0xffff, "vs_min_color", "NVDI" }, /* NVDI 5.00 */
+		{ 207, 2, 0xffff, "vs_max_color", "NVDI" }, /* NVDI 5.00 */
+		{ 207, 3, 0xffff, "vs_weight_color", "NVDI" }, /* NVDI 5.00 */
+		{ 208, 0, 0xffff, "v_create_itab", "NVDI" }, /* NVDI 5.00 */
+		{ 208, 1, 0xffff, "v_delete_itab", "NVDI" }, /* NVDI 5.00 */
+		{ 209, 0, 0xffff, "vq_hilite_color", "NVDI" }, /* NVDI 5.00 */
+		{ 209, 1, 0xffff, "vq_min_color", "NVDI" }, /* NVDI 5.00 */
+		{ 209, 2, 0xffff, "vq_max_color", "NVDI" }, /* NVDI 5.00 */
+		{ 209, 3, 0xffff, "vq_weight_color", "NVDI" }, /* NVDI 5.00 */
+		{ 224, 100, 0xffff, "vs_backmap", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 224, 101, 0xffff, "vs_outmode", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 224, 105, 0xffff, "vs_use_fonts", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 225, 0, 0xffff, "vqt_drv_avail", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 226, 1, 0xffff, "v_set_cachedir", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 226, 2, 0xffff, "v_get_cachedir", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 226, 3, 0xffff, "v_def_cachedir", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 226, 4, 0xffff, "v_clr_cachedir", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 226, 5, 0xffff, "v_delete_cache", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 226, 6, 0xffff, "v_save_cache", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 229, 0, 0xffff, "vqt_xfntinfo", "GDOS" }, /* NVDI 3.02 */
+		{ 230, 0, 0xffff, "vst_name", "GDOS" }, /* NVDI 3.02 */
+		{ 230, 100, 0xffff, "vqt_name_and_id", "GDOS" }, /* NVDI 3.02 */
+		{ 231, 0, 0xffff, "vst_width", "GDOS" }, /* NVDI 3.00 */
+		{ 232, 0, 0xffff, "vqt_fontheader", "GDOS" }, /* NVDI 3.00 */
+		{ 233, 0, 0xffff, "v_mono_ftext", "Speedo" }, /* SpeedoGDOS 5.1 */
+		{ 234, 0, 0xffff, "vqt_trackkern", "GDOS" }, /* NVDI 3.00 */
+		{ 235, 0, 0xffff, "vqt_pairkern", "GDOS" }, /* NVDI 3.00 */
+		{ 236, 0, 0xffff, "vst_charmap", "GDOS" }, /* NVDI 3.00 */
+		{ 236, 0, 0xffff, "vst_map_mode", "GDOS" }, /* NVDI 4.00 */
+		{ 237, 0, 0xffff, "vst_kern", "GDOS" }, /* NVDI 3.00 */
+		{ 237, 0, 0xffff, "vst_track_offset", "GDOS" }, /* NVDI 3.00 */
+		{ 238, 0, 0xffff, "vq_ptsinsz", "GDOS" },
+		{ 239, 0, 0xffff, "v_getbitmap_info", "GDOS" }, /* NVDI 3.00 */
+		{ 240, 0, 0xffff, "vqt_f_extent", "GDOS" }, /* NVDI 3.00 */
+		{ 240, 4200, 0xffff, "vqt_real_extent", "GDOS" }, /* NVDI 3.00 */
+		{ 241, 0, 0xffff, "v_ftext", "GDOS" }, /* NVDI 3.00 */
+		{ 242, 0, 0xffff, "v_killoutline", "GDOS" }, /* FSM */
+		{ 243, 0, 0xffff, "v_getoutline", "GDOS" }, /* NVDI 3.00 */
+		{ 243, 1, 0xffff, "v_get_outline", "GDOS" }, /* NVDI 5.00 */
+		{ 243, 31, 0xffff, "v_fgetoutline", "Speedo" }, /* SpeedoGDOS 5.0d */
+		{ 244, 0, 0xffff, "vst_scratch", "Speedo" },
+		{ 245, 0, 0xffff, "vst_error", "Speedo" }, /* SpeedoGDOS 4.00 */
+		{ 246, 0, 0xffff, "vst_arbpt", "GDOS" }, /* SpeedoGDOS 4.00 */
+		{ 246, 0, 0xffff, "vst_arbpt32", "GDOS" }, /* NVDI 3.00 */
+		{ 247, 0, 0xffff, "vqt_advance", "GDOS" }, /* SpeedoGDOS 4.00 */
+		{ 247, 0, 0xffff, "vqt_advance32", "GDOS" }, /* NVDI 3.00 */
+		{ 248, 0, 0xffff, "vq_devinfo", "GDOS" }, /* NVDI 3.00 */
+		{ 248, 0, 0xffff, "vqt_devinfo", "GDOS" }, /* SpeedoGDOS 4.00 */
+		{ 248, 4242, 0xffff, "vq_ext_devinfo", "GDOS" }, /* NVDI 3.00 */
+		{ 249, 0, 0xffff, "v_savecache", "Speedo" },
+		{ 250, 0, 0xffff, "v_loadcache", "Speedo" },
+		{ 251, 0, 0xffff, "v_flushcache", "GDOS" }, /* NVDI */
+		{ 252, 0, 0xffff, "vst_setsize32", "GDOS" }, /* NVDI 3.00 */
+		{ 252, 0, 0xffff, "vst_setsize", "GDOS" }, /* SpeedoGDOS 4.00 */
+		{ 253, 0, 0xffff, "vst_skew", "GDOS" }, /* NVDI 3.00 */
+		{ 254, 0, 0xffff, "vqt_get_table", "GDOS" }, /* SpeedoGDOS 4.00 */
+		{ 255, 0, 0xffff, "vqt_cachesize", "Speedo" }, /* SpeedoGDOS 4.00 */
+		{ 255, 100, 0xffff, "vqt_cacheinfo", "Speedo" }, /* SpeedoGDOS 4.00 */
 	};
 
+	*extra_info = NULL;
 	if (opcode == 5)
 	{
-		if (subcode < ARRAYSIZE(names_opcode5)) {
+		if (subcode < ARRAY_SIZE(names_opcode5)) {
 			return names_opcode5[subcode];
-		}
-		if (subcode >= 98) {
-			subcode -= 98;
-			if (subcode < ARRAYSIZE(names_opcode5_98)) {
-				return names_opcode5_98[subcode];
-			}
 		}
 	}
 	else if (opcode == 11)
 	{
-		if (subcode < ARRAYSIZE(names_opcode11)) {
+		if (subcode < ARRAY_SIZE(names_opcode11)) {
 			return names_opcode11[subcode];
 		}
 	}
-	else if (opcode < ARRAYSIZE(names_0))
+	else if (opcode < ARRAY_SIZE(names_0))
 	{
+		if (opcode == 1 && nintin >= 16)
+			return "v_opnprn";
+		if (opcode == 6 && subcode == 13)
+			return "v_bez";
+		if (opcode == 9 && subcode == 13)
+			return "v_bez_fill";
 		return names_0[opcode];
 	}
-	else if (opcode >= 100)
+	else if (opcode > 100)
 	{
-		opcode -= 100;
-		if (opcode < ARRAYSIZE(names_100))
+		Uint16 idx = opcode - 100;
+		if (idx < ARRAY_SIZE(names_100))
 		{
-			return names_100[opcode];
+			return names_100[idx];
 		}
 	}
-	return "GDOS?";
+	for (i = 0; i < ARRAY_SIZE(names_other); i++)
+		if (names_other[i].opcode == opcode)
+		{
+			if ((names_other[i].subcode == subcode || names_other[i].subcode == 0xffff) &&
+				(nintin >= names_other[i].nintin || names_other[i].nintin == 0xffff))
+			{
+				*extra_info = names_other[i].extra_info;
+				return names_other[i].name;
+			}
+		}
+	return "???";
+}
+
+
+/**
+ * Verify given VDI table pointer and store variables from
+ * it for later use. Return true for success
+ */
+static bool VDI_StoreVars(Uint32 TablePtr)
+{
+	if (!STMemory_CheckAreaType(TablePtr, 20, ABFLAG_RAM))
+	{
+		Log_Printf(LOG_WARN, "VDI param store failed due to invalid parameter block address 0x%x+%i\n", TablePtr, 20);
+		return false;
+	}
+	/* store values for extended VDI resolution handling
+	 * and debugger "info vdi" command
+	 */
+	VDIControl = STMemory_ReadLong(TablePtr);
+	VDIIntin   = STMemory_ReadLong(TablePtr+4);
+	VDIPtsin   = STMemory_ReadLong(TablePtr+8);
+	VDIIntout  = STMemory_ReadLong(TablePtr+12);
+	VDIPtsout  = STMemory_ReadLong(TablePtr+16);
+	VDIOpCode  = STMemory_ReadWord(VDIControl);
+	return true;
 }
 
 /**
  * If opcodes argument is set, show VDI opcode/function name table,
  * otherwise VDI vectors information.
  */
-void VDI_Info(Uint32 bShowOpcodes)
+void VDI_Info(FILE *fp, Uint32 bShowOpcodes)
 {
-	Uint16 opcode, subcode;
+	Uint16 opcode, subcode, nintin;
+	const char *extra_info;
+	const char *name;
 
 	if (bShowOpcodes)
 	{
 		Uint16 opcode;
-		for (opcode = 0; opcode < 0x84; )
+		for (opcode = 0; opcode <= 0x84; )
 		{
 			if (opcode == 0x28)
 			{
-				fputs("--- GDOS calls? ---\n", stderr);
+				fputs("--- GDOS calls? ---\n", fp);
 				opcode = 0x64;
 			}
-			fprintf(stderr, "%02x %-16s",
-				opcode, VDI_Opcode2Name(opcode, 0));
-			if (++opcode % 4 == 0) fputs("\n", stderr);
+			fprintf(fp, "%02x %-16s",
+				opcode, VDI_Opcode2Name(opcode, 0, 0, &extra_info));
+			if (++opcode % 4 == 0) fputs("\n", fp);
 		}
 		return;
 	}
-	if (!bVdiAesIntercept)
+	opcode = Vars_GetVdiOpcode();
+	if (opcode != INVALID_OPCODE)
 	{
-		fputs("VDI/AES interception isn't enabled!\n", stderr);
-		return;
+		if (!VDI_StoreVars(Regs[REG_D1]))
+			return;
 	}
-	if (!VDIControl)
+	else
 	{
-		fputs("No traced VDI calls!\n", stderr);
-		return;
+		if (!bVdiAesIntercept)
+		{
+			fputs("VDI/AES interception isn't enabled!\n", fp);
+			return;
+		}
+		if (!VDIControl)
+		{
+			fputs("No traced VDI calls!\n", fp);
+			return;
+		}
+		opcode = STMemory_ReadWord(VDIControl);
 	}
-	opcode = STMemory_ReadWord(VDIControl);
 	if (opcode != VDIOpCode)
 	{
-		fputs("VDI parameter block contents changed since last call!\n", stderr);
+		fputs("VDI parameter block contents changed since last call!\n", fp);
 		return;
 	}
 
-	fputs("Latest VDI Parameter block:\n", stderr);
+	fputs("Latest VDI Parameter block:\n", fp);
 	subcode = STMemory_ReadWord(VDIControl+2*5);
-	fprintf(stderr, "- Opcode/Subcode: %hd/%hd (%s)\n",
-		opcode, subcode, VDI_Opcode2Name(opcode, subcode));
-	fprintf(stderr, "- Device handle: %d\n",
+	nintin = STMemory_ReadWord(VDIControl+2*3);
+	name = VDI_Opcode2Name(opcode, subcode, nintin, &extra_info);
+	fprintf(fp, "- Opcode/Subcode: %hd/%hd (%s%s%s)\n",
+		opcode, subcode, name, extra_info ? ", " : "", extra_info ? extra_info : "");
+	fprintf(fp, "- Device handle: %d\n",
 		STMemory_ReadWord(VDIControl+2*6));
-	fprintf(stderr, "- Control: %#8x\n", VDIControl);
-	fprintf(stderr, "- Ptsin:   %#8x, %d co-ordinate word pairs\n",
+	fprintf(fp, "- Control: %#8x\n", VDIControl);
+	fprintf(fp, "- Ptsin:   %#8x, %d coordinate word pairs\n",
 		VDIPtsin, STMemory_ReadWord(VDIControl+2*1));
-	fprintf(stderr, "- Ptsout:  %#8x, %d co-ordinate word pairs\n",
+	fprintf(fp, "- Ptsout:  %#8x, %d coordinate word pairs\n",
 		VDIPtsout, STMemory_ReadWord(VDIControl+2*2));
-	fprintf(stderr, "- Intin:   %#8x, %d words\n",
+	fprintf(fp, "- Intin:   %#8x, %d words\n",
 		VDIIntin, STMemory_ReadWord(VDIControl+2*3));
-	fprintf(stderr, "- Intout:  %#8x, %d words\n",
+	fprintf(fp, "- Intout:  %#8x, %d words\n",
 		VDIIntout, STMemory_ReadWord(VDIControl+2*4));
 }
 
 #else /* !ENABLE_TRACING */
-void AES_Info(Uint32 bShowOpcodes)
+void AES_Info(FILE *fp, Uint32 bShowOpcodes)
 {
-	fputs("Hatari isn't configured with ENABLE_TRACING\n", stderr);
+	fputs("Hatari isn't configured with ENABLE_TRACING\n", fp);
 }
-void VDI_Info(Uint32 bShowOpcodes)
+void VDI_Info(FILE *fp, Uint32 bShowOpcodes)
 {
-	fputs("Hatari isn't configured with ENABLE_TRACING\n", stderr);
+	fputs("Hatari isn't configured with ENABLE_TRACING\n", fp);
 }
 #endif /* !ENABLE_TRACING */
 
@@ -793,19 +901,8 @@ bool VDI_AES_Entry(void)
 	/* AES call? */
 	if (call == 0xC8)
 	{
-		if (!STMemory_ValidArea(TablePtr, 24))
-		{
-			Log_Printf(LOG_WARN, "AES call failed due to invalid parameter block address 0x%x+%i\n", TablePtr, 24);
+		if (!AES_StoreVars(TablePtr))
 			return false;
-		}
-		/* store values for debugger "info aes" command */
-		AESControl = STMemory_ReadLong(TablePtr);
-		AESGlobal  = STMemory_ReadLong(TablePtr+4);
-		AESIntin   = STMemory_ReadLong(TablePtr+8);
-		AESIntout  = STMemory_ReadLong(TablePtr+12);
-		AESAddrin  = STMemory_ReadLong(TablePtr+16);
-		AESAddrout = STMemory_ReadLong(TablePtr+20);
-		AESOpCode  = STMemory_ReadWord(AESControl);
 		if (LOG_TRACE_LEVEL(TRACE_OS_AES))
 		{
 			AES_OpcodeInfo(TraceFile, AESOpCode);
@@ -821,26 +918,16 @@ bool VDI_AES_Entry(void)
 	/* VDI call? */
 	if (call == 0x73)
 	{
-		if (!STMemory_ValidArea(TablePtr, 20))
-		{
-			Log_Printf(LOG_WARN, "VDI call failed due to invalid parameter block address 0x%x+%i\n", TablePtr, 20);
+		if (!VDI_StoreVars(TablePtr))
 			return false;
-		}
-		/* store values for extended VDI resolution handling
-		 * and debugger "info vdi" command
-		 */
-		VDIControl = STMemory_ReadLong(TablePtr);
-		VDIIntin   = STMemory_ReadLong(TablePtr+4);
-		VDIPtsin   = STMemory_ReadLong(TablePtr+8);
-		VDIIntout  = STMemory_ReadLong(TablePtr+12);
-		VDIPtsout  = STMemory_ReadLong(TablePtr+16);
-		VDIOpCode  = STMemory_ReadWord(VDIControl);
 #if ENABLE_TRACING
 		{
 		Uint16 subcode = STMemory_ReadWord(VDIControl+2*5);
-		LOG_TRACE(TRACE_OS_VDI, "VDI call %3hd/%3hd (%s)\n",
-			  VDIOpCode, subcode,
-			  VDI_Opcode2Name(VDIOpCode, subcode));
+		Uint16 nintin = STMemory_ReadWord(VDIControl+2*3);
+		const char *extra_info;
+		const char *name = VDI_Opcode2Name(VDIOpCode, subcode, nintin, &extra_info);
+		LOG_TRACE(TRACE_OS_VDI, "VDI call %3hd/%3hd (%s%s%s)\n",
+			  VDIOpCode, subcode, name, extra_info ? ", " : "", extra_info ? extra_info : "");
 		}
 #endif
 		/* Only workstation open needs to be handled at trap return */
@@ -858,21 +945,69 @@ bool VDI_AES_Entry(void)
  */
 void VDI_LineA(Uint32 linea, Uint32 fontbase)
 {
+	Uint32 fontadr, font1, font2;
+
+	LineABase = linea;
+	FontBase = fontbase;
+
+	LOG_TRACE(TRACE_OS_VDI, "VDI mode line-A variable init\n");
 	if (bUseVDIRes)
 	{
-		int cel_ht = STMemory_ReadWord(linea-46);             /* v_cel_ht */
-		STMemory_WriteWord(linea-44, (VDIWidth/8)-1);         /* v_cel_mx (cols-1) */
+		int cel_ht, cel_wd;
+
+		fontadr = STMemory_ReadLong(linea-0x1cc); /* def_font */
+		if (fontadr == 0)
+		{
+			/* get 8x8 font header */
+			font1 = STMemory_ReadLong(fontbase + 4);
+			/* get 8x16 font header */
+			font2 = STMemory_ReadLong(fontbase + 8);
+			/* remove DEFAULT flag from 8x8 font */
+			STMemory_WriteWord(font1 + 66, STMemory_ReadWord(font1 + 66) & ~0x01);
+			/* remove DEFAULT flag from 8x16 font */
+			STMemory_WriteWord(font2 + 66, STMemory_ReadWord(font2 + 66) & ~0x01);
+			/* choose new font */
+			if (VDIHeight >= 400)
+			{
+				fontadr = font2;
+			} else
+			{
+				fontadr = font1;
+			}
+			/* make this new default font */
+			STMemory_WriteLong(linea-0x1cc, fontadr);
+			/* set DEFAULT flag for chosen font */
+			STMemory_WriteWord(fontadr + 66, STMemory_ReadWord(fontadr + 66) | 0x01);
+		}
+		cel_wd = STMemory_ReadWord(fontadr + 52);
+		cel_ht = STMemory_ReadWord(fontadr + 82);
+		if (cel_wd <= 0)
+		{
+			Log_Printf(LOG_WARN, "VDI Line-A init failed due to bad cell width!\n");
+			return;
+		}
+		if (cel_ht <= 0)
+		{
+			Log_Printf(LOG_WARN, "VDI Line-A init failed due to bad cell height!\n");
+			return;
+		}
+
+		STMemory_WriteWord(linea-46, cel_ht);                 /* v_cel_ht */
+		STMemory_WriteWord(linea-44, (VDIWidth/cel_wd)-1);    /* v_cel_mx (cols-1) */
 		STMemory_WriteWord(linea-42, (VDIHeight/cel_ht)-1);   /* v_cel_my (rows-1) */
 		STMemory_WriteWord(linea-40, cel_ht*((VDIWidth*VDIPlanes)/8));  /* v_cel_wr */
 
+		STMemory_WriteLong(linea-22, STMemory_ReadLong(fontadr + 76)); /* v_fnt_ad */
+		STMemory_WriteWord(linea-18, STMemory_ReadWord(fontadr + 38)); /* v_fnt_nd */
+		STMemory_WriteWord(linea-16, STMemory_ReadWord(fontadr + 36)); /* v_fnt_st */
+		STMemory_WriteWord(linea-14, STMemory_ReadWord(fontadr + 80)); /* v_fnt_wd */
 		STMemory_WriteWord(linea-12, VDIWidth);               /* v_rez_hz */
+		STMemory_WriteLong(linea-10, STMemory_ReadLong(fontadr + 72)); /* v_off_ad */
 		STMemory_WriteWord(linea-4, VDIHeight);               /* v_rez_vt */
 		STMemory_WriteWord(linea-2, (VDIWidth*VDIPlanes)/8);  /* bytes_lin */
 		STMemory_WriteWord(linea+0, VDIPlanes);               /* planes */
 		STMemory_WriteWord(linea+2, (VDIWidth*VDIPlanes)/8);  /* width */
 	}
-	LineABase = linea;
-	FontBase = fontbase;
 }
 
 
@@ -897,92 +1032,5 @@ void VDI_Complete(void)
 	STMemory_WriteWord(LineABase-0x159*2, VDIHeight-1);  /* WKYRez */
 
 	VDI_LineA(LineABase, FontBase);  /* And modify Line-A structure accordingly */
-}
-
-
-/*-----------------------------------------------------------------------*/
-/**
- * Save desktop configuration file for VDI, eg desktop.inf(TOS 1.04) or newdesk.inf(TOS 2.06)
- */
-static void VDI_SaveDesktopInf(char *pszFileName, const Uint8 *Script, long ScriptSize)
-{
-	/* Just save file */
-	File_Save(pszFileName, Script, ScriptSize, false);
-}
-
-
-/*-----------------------------------------------------------------------*/
-/**
- * Modify exisiting ST desktop configuration files to set resolution(keep user settings)
- */
-static void VDI_ModifyDesktopInf(char *pszFileName)
-{
-	long InfSize;
-	Uint8 *pInfData;
-	int i;
-
-	/* Load our '.inf' file */
-	pInfData = HFile_Read(pszFileName, &InfSize, NULL);
-	if (pInfData)
-	{
-		/* Scan file for '#E' */
-		i = 0;
-		while (i < (InfSize-8))
-		{
-			if ((pInfData[i]=='#') && (pInfData[i+1]=='E'))
-			{
-				/* Modify resolution */
-				pInfData[i+7] = '1'+VDIRes;
-				break;
-			}
-
-			i++;
-		}
-
-		/* And save */
-		File_Save(pszFileName, pInfData, InfSize, false);
-		/* Free */
-		free(pInfData);
-	}
-}
-
-
-/*-----------------------------------------------------------------------*/
-/**
- * Modify (or create) ST desktop configuration files so VDI boots up in
- * correct color depth
- */
-static void VDI_FixDesktopInf(void)
-{
-	char *szDesktopFileName, *szNewDeskFileName;
-
-	/* Modifying DESKTOP.INF only makes sense when we emulate the GEMDOS
-	 * hard disk 'C:' (i.e. the HD we boot from) - if not, simply return */
-	if (!GemDOS_IsDriveEmulated(2))
-	{
-		return;
-	}
-
-	szDesktopFileName = malloc(2 * FILENAME_MAX);
-	if (!szDesktopFileName)
-	{
-		perror("VDI_FixDesktopInf");
-		return;
-	}
-	szNewDeskFileName = szDesktopFileName + FILENAME_MAX;
-
-	/* Create filenames for hard-drive */
-	GemDOS_CreateHardDriveFileName(2, "\\DESKTOP.INF", szDesktopFileName, FILENAME_MAX);
-	GemDOS_CreateHardDriveFileName(2, "\\NEWDESK.INF", szNewDeskFileName, FILENAME_MAX);
-
-	/* First, check if files exist(ie modify or replace) */
-	if (!File_Exists(szDesktopFileName))
-		VDI_SaveDesktopInf(szDesktopFileName,DesktopScript,sizeof(DesktopScript));
-	VDI_ModifyDesktopInf(szDesktopFileName);
-
-	if (!File_Exists(szNewDeskFileName))
-		VDI_SaveDesktopInf(szNewDeskFileName,NewDeskScript,sizeof(NewDeskScript));
-	VDI_ModifyDesktopInf(szNewDeskFileName);
-
-	free(szDesktopFileName);
+	LOG_TRACE(TRACE_OS_VDI, "VDI mode Workstation Open return values fix\n");
 }

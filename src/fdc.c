@@ -15,7 +15,7 @@
   simplified and would need to be changed to handle more complex disk images (Pasti).
 */
 
-const char FDC_fileid[] = "Hatari fdc.c : " __DATE__ " " __TIME__;
+const char FDC_fileid[] = "Hatari fdc.c";
 
 #include <inttypes.h>
 
@@ -63,7 +63,7 @@ Programmable Sound Generator (YM-2149)
     1001    Channel B Amplitude
     1010    Channel C Amplitude
     1011    Envelope Period Fine Tune
-    1100    Envelope Peroid Coarse Tune
+    1100    Envelope Period Coarse Tune
     1101    Envelope Shape
     1110    I/O Port A Select (Write only)
     1111    I/O Port B Select
@@ -127,6 +127,19 @@ ACSI DMA and Floppy Disk Controller(FDC)
     1  0    Sector Register    Sector Register
     1  1    Data Register    Data Register
 
+  0xff860e - DD/HD mode selection - NOTE bits 2-15 are not used
+    This register is only available on MegaSTE, TT and Falcon
+    Bit 0 - FDC Frequency  0=8 MHz  1=16 MHz
+    Bit 1 - Density  0=DD  1=HD
+
+  0xff9200 - DIP switches setting - NOTE bits 0-7 are used by joypads on STE and Falcon
+    Bit 8-15 of this register are only used on MegaSTE, TT and Falcon and reflect
+      the state of the 8 DIP switches (or soldering) on the motherboard
+    TT and Falcon were produced with HD drives. But MegaSTE were first produced with
+      DD drives then later with HD drives
+    Bit 8-13 - Not used or machine dependent
+    Bit 14   - Floppy Drive model    0=HD drive  1=DD drive
+    Bit 15   - Disable DMA sound     0=disable   1=don't disable
 
   NOTE [NP] : The DMA is connected to the FDC and its Data Register, each time a DRQ
   is made by the FDC, it's handled by the DMA through its internal 16 bytes buffer.
@@ -184,26 +197,21 @@ ACSI DMA and Floppy Disk Controller(FDC)
   Detecting disk changes :
   ------------------------
   3'1/2 floppy drives include a 'DSKCHG' signal on pin 34 to detect when a disk was changed.
-  Unfortunatelly on ST, this signal is not connected. Nevertheless, it's possible to detect
+  Unfortunately on ST, this signal is not connected. Nevertheless, it's possible to detect
   a disk was inserted or ejected by looking at the 'WPT' signal which tells if a disk is write
-  protected or not.
-  At the drive level, a light is emitted above the top left corner of the floppy :
-   - if the write protection hole on the floppy is opened, the light goes through and the disk
-     is considered to be write protected.
-   - if the write protection hole on the floppy is closed, the light can't go through and the
-     disk is write enabled.
-  The point is that when any "solid" part of the floppy obstructs the light signal, the WPT
-  signal will change immediately : it will be considered as if a write enabled disk was present.
-  So, when a floppy is ejected or inserted, the body of the floppy will briefly obstruct the light,
-  whatever the state of the protection hole could be.
-  Similarly, when there's no floppy inside the drive, the light signal can pass through, so it will
-  be considered as if a write protected disk was present.
-  So, let's call 'C' the state when protection hole is Closed (ie WPT = 0) and 'O' the state
-  when protection hole is Opened (ie WPT = 1). We have the following cases :
-    - floppy in drive : state can be C or O depending on the protection tab. Let's call it 'X'
-    - no floppy in drive : state is equivalent to O (because the light signal is not obstructed)
-    - ejecting a floppy : states will go from X to C and finally to O
-    - inserting a floppy : states will go from O to C and finally to X
+  protected or not (but this method has some limitations and doesn't work in all cases).
+
+  The following values of the WPT signal were measured with a custom program when ejecting/inserting
+  a floppy (tested on a 520 STF with a single sided drive and with a double sided drive) :
+    - floppy with write protection OFF (write possible), WPT=0 :
+	eject   start=0 -> end=1
+	insert  start=1 -> end=0
+    - floppy with write protection ON (write not possible), WPT=1 :
+	eject   start=1 -> end=1
+	insert  start=1 -> end=1
+
+  As can be seen, when a disk is write protected (WPT=1), it is not possible to detect the
+  transition between inserting and ejecting, WPT will always be 1.
 
   The TOS monitors the changes on the WPT signal to determine if a floppy was ejected or inserted.
   On TOS 1.02fr, the code is located between $fc1bc4 and $fc1ebc. Every 8 VBL, one floppy drive is checked
@@ -211,15 +219,23 @@ ACSI DMA and Floppy Disk Controller(FDC)
   WPT signal during at least 8 VBLs. When 2 drive are connected, each drive is checked every 16 VBLs, so
   the WPT signal should be kept for at least 16 VBLs.
 
-  During these transition phases between "ejected" and "inserted", we force the WPT signal to either 0 or 1,
+  During these transition phases between "ejected" and "inserted", we force the WPT signal to 1,
   depending on which transition we're emulating (see Floppy_DriveTransitionUpdateState()) :
-    - Ejecting : WPT will be X, then 0, then 1
-    - Inserting : WPT will be 1, then 0, then X
+    - Ejecting : WPT will be X, then 1
+    - Inserting : WPT will be 1, then X
+
+  NOTE : the TT machines have support for "real" disk change by the mean of the Disk Change (DC)
+  signal as output on the pin 34 of the internal floppy drive. The DC signal is then inverted
+  and connected to GPIP4 on the TT MFP. See FDC_Drive_Get_DC_signal for more details.
+  The DC signal is only available for the internal floppy drive, not the external one.
+  Note also that TOS 3 (for TT) doesn't use this signal, it only uses the above method
+  monitoring the write protect signal.
 
 */
 
 /*-----------------------------------------------------------------------*/
 
+/* Status register */
 #define	FDC_STR_BIT_BUSY			0x01
 #define	FDC_STR_BIT_INDEX			0x02		/* type I */
 #define	FDC_STR_BIT_DRQ				0x02		/* type II and III */
@@ -232,16 +248,6 @@ ACSI DMA and Floppy Disk Controller(FDC)
 #define	FDC_STR_BIT_WPRT			0x40
 #define	FDC_STR_BIT_MOTOR_ON			0x80
 
-
-#define	FDC_COMMAND_BIT_VERIFY			(1<<2)		/* 0=no verify after type I, 1=verify after type I */
-#define	FDC_COMMAND_BIT_HEAD_LOAD		(1<<2)		/* for type II/III 0=no extra delay, 1=add 30 ms delay to set the head */
-#define	FDC_COMMAND_BIT_SPIN_UP			(1<<3)		/* 0=enable motor's spin up, 1=disable motor's spin up */
-#define	FDC_COMMAND_BIT_UPDATE_TRACK		(1<<4)		/* 0=don't update TR after type I, 1=update TR after type I */
-#define	FDC_COMMAND_BIT_MULTIPLE_SECTOR		(1<<4)		/* 0=read/write only 1 sector, 1=read/write many sectors */
-
-
-#define FDC_INTERRUPT_COND_IP			(1<<2)		/* Force interrupt on Index Pulse */
-#define FDC_INTERRUPT_COND_IMMEDIATE		(1<<3)		/* Force interrupt immediate */
 
 
 /* FDC Emulation commands used in FDC.Command */
@@ -399,7 +405,7 @@ enum
 
 
 /* Delays are in micro sec */
-#define	FDC_DELAY_US_HEAD_LOAD			( 15 * 1000 )	/* Additionnal 15 ms delay to load the head in type II/III */
+#define	FDC_DELAY_US_HEAD_LOAD			( 15 * 1000 )	/* Additional 15 ms delay to load the head in type II/III */
 
 /* Index pulse signal remains high during 3.71 ms on each rotation ([NP] tested on my STF, can vary between 1.5 and 4 ms depending on the drive) */
 #define	FDC_DELAY_US_INDEX_PULSE_LENGTH		( 3.71 * 1000 )
@@ -433,7 +439,7 @@ enum
 
 #define	FDC_STEP_RATE				( FDC.CR & 0x03 )	/* Bits 0 and 1 of the current type I command */
 
-static int FDC_StepRate_ms[] = { 6 , 12 , 2 , 3 };		/* Controlled by bits 1 and 0 (r1/r0) in type I commands */
+int FDC_StepRate_ms[] = { 6 , 12 , 2 , 3 };			/* Controlled by bits 1 and 0 (r1/r0) in type I commands */
 
 
 
@@ -441,7 +447,7 @@ static int FDC_StepRate_ms[] = { 6 , 12 , 2 , 3 };		/* Controlled by bits 1 and 
 #define	FDC_FAST_FDC_FACTOR			10		/* Divide all delays by this value when --fastfdc is used */
 
 /* Standard ST floppies are double density ; to simulate HD or ED floppies, we use */
-/* a density factor to have x2 or x4 bytes more during 1 FDC cycle */
+/* a density factor to have x2 or x4 more bytes during 1 FDC cycle */
 #define	FDC_DENSITY_FACTOR_DD			1
 #define	FDC_DENSITY_FACTOR_HD			2		/* For a HD disk, we get x2 bytes than DD */
 #define	FDC_DENSITY_FACTOR_ED			4		/* For a ED disk, we get x4 bytes than DD */
@@ -463,6 +469,10 @@ typedef struct {
 	Uint8		SideSignal;				/* Side 0 or 1 */
 	int		DriveSelSignal;				/* 0 or 1 for drive A or B ; or -1 if no drive selected */
 	Uint8		IRQ_Signal;				/* 0 if IRQ is not set, else value depends on the source of the IRQ */
+
+	Uint16		DensityMode;				/* bits 0 and 1 of $ff860e */
+								/* 0x00 : FDC operates in DD mode */
+								/* 0x03 : FDC operates in HD mode */
 
 	/* Other variables */
 	int		Command;				/* FDC emulation command currently being executed */
@@ -493,6 +503,8 @@ typedef struct {
 	Uint8		FIFO[ FDC_DMA_FIFO_SIZE ];
 	int		FIFO_Size;				/* Between 0 and FDC_DMA_FIFO_SIZE */
 
+	Uint32		Address;
+
 	Uint16		ff8604_recent_val;			/* Most recent value read/written at $ff8604 in fdc/hdc mode (bit4=0 in $ff8606) */
 
 	/* Variables to handle our DMA buffer */
@@ -506,10 +518,14 @@ typedef struct {
 	bool		Enabled;
 	bool		DiskInserted;
 	int		RPM;					/* Rotation Per Minutes * 1000 */
-	int		Density;				/* 1 for DD (720 kB), 2 for HD (1.4 MB), 4 for ED (2.8 MB) */
+	int		FloppyDensity;				/* Density of the inserted floppy for current track/side */
+								/* 1 for DD (720 kB), 2 for HD (1.4 MB), 4 for ED (2.8 MB) */
 	Uint8		HeadTrack;				/* Current position of the head */
 //	Uint8		Motor;					/* State of the drive's motor : 0=OFF 1=ON */
 	Uint8		NumberOfHeads;				/* 1 for single sided drive, 2 for double sided */
+	Uint8		DiskChange_signal;			/* 0=disk ejected 1=disk inserted and step pulse received */
+								/* This signal is available on pin 34 of compatible drives */
+								/* and connected to the 2nd MFP of the TT */
 
 	Uint64		IndexPulse_Time;			/* CyclesGlobalClockCounter value last time we had an index pulse with motor ON */
 } FDC_DRIVE_STRUCT;
@@ -557,10 +573,13 @@ static void	FDC_CRC16 ( Uint8 *buf , int nb , Uint16 *pCRC );
 static void	FDC_ResetDMA ( void );
 
 static int	FDC_GetEmulationMode ( void );
-static void	FDC_UpdateAll ( void );
+static void	FDC_Drive_Connect_DC_signal_GPIP ( int Drive );
+static void	FDC_Drive_Set_DC_signal ( int Drive , Uint8 val );
 static int	FDC_GetSectorsPerTrack ( int Drive , int Track , int Side );
 static int	FDC_GetSidesPerDisk ( int Drive , int Track );
-static int	FDC_GetDensity ( int Drive );
+static int	FDC_GetTracksPerDisk ( int Drive );
+static int	FDC_ComputeFloppyDensity ( Uint8 Drive , Uint8 Track , Uint8 Side );
+static void	FDC_UpdateFloppyDensity ( Uint8 Drive , Uint8 Track , Uint8 Side );
 
 static Uint32	FDC_GetCyclesPerRev_FdcCycles ( int Drive );
 static void	FDC_IndexPulse_Update ( void );
@@ -689,7 +708,7 @@ int	FDC_Get_Statusbar_Text ( char *text, size_t maxlen )
 	else if ( ( Command & 0xf0 ) == 0x10 )	strcpy ( CommandText , "SE" );		/* Seek */
 	else if ( ( Command & 0xe0 ) == 0x20 )	strcpy ( CommandText , "ST" );		/* Step */
 	else if ( ( Command & 0xe0 ) == 0x40 )	strcpy ( CommandText , "SI" );		/* Step In */
-	else if ( ( Command & 0xe0 ) == 0x50 )	strcpy ( CommandText , "SO" );		/* Step Out */
+	else if ( ( Command & 0xe0 ) == 0x60 )	strcpy ( CommandText , "SO" );		/* Step Out */
 	else if ( ( Command & 0xe0 ) == 0x80 )	strcpy ( CommandText , "RS" );		/* Read Sector */
 	else if ( ( Command & 0xe0 ) == 0xa0 )	strcpy ( CommandText , "WS" );		/* Write Sector */
 	else if ( ( Command & 0xf0 ) == 0xc0 )	strcpy ( CommandText , "RA" );		/* Read Address */
@@ -723,9 +742,8 @@ static Uint32	FDC_DelayToFdcCycles ( Uint32 Delay_micro )
 /**
  * Convert a number of fdc cycles at freq MachineClocks.FDC_Freq to a number
  * of cpu cycles at freq MachineClocks.CPU_Freq
- * TODO : we use a fixed 8 MHz clock and nCpuFreqShift to convert cycles for our
- * internal timers in cycInt.c. This should be replaced some days by using
- * MachineClocks.CPU_Freq and not using nCpuFreqShift anymore.
+ * TODO : we use a fixed 8 MHz clock to convert cycles for our internal timers
+ * in cycInt.c. This should be replaced some days by using MachineClocks.CPU_Freq.
  * (for Falcon, we multiply cycles by 2 to simulate a freq in the 8 MHz range)
  */
 static Uint32	FDC_FdcCyclesToCpuCycles ( Uint32 FdcCycles )
@@ -735,12 +753,12 @@ static Uint32	FDC_FdcCyclesToCpuCycles ( Uint32 FdcCycles )
 	/* Our conversion expects FDC_Freq to be nearly the same as CPU_Freq (8 Mhz) */
 	/* but the Falcon uses a 16 MHz clock for the Ajax FDC */
 	/* FIXME : as stated above, this should be handled better, without involving 8 MHz CPU_Freq */
-	if ( ConfigureParams.System.nMachineType == MACHINE_FALCON )
+	if (Config_IsMachineFalcon())
 		FdcCycles *= 2;					/* correct delays for a 8 MHz FDC_Freq clock instead of 16 */
 
 //	CpuCycles = rint ( ( (Uint64)FdcCycles * MachineClocks.CPU_Freq ) / MachineClocks.FDC_Freq );
 	CpuCycles = rint ( ( (Uint64)FdcCycles * 8021247.L ) / MachineClocks.FDC_Freq );
-	CpuCycles >>= nCpuFreqShift;				/* Compensate for x2 or x4 cpu speed */
+	CpuCycles <<= nCpuFreqShift;				/* Convert to x1 or x2 or x4 cpu speed */
 
 //fprintf ( stderr , "fdc command %d machine %d fdc cycles %d cpu cycles %d\n" , FDC.Command , ConfigureParams.System.nMachineType , FdcCycles , CpuCycles );
 //if ( Delay==4104) Delay=4166;		// 4166 : decade demo
@@ -753,23 +771,23 @@ static Uint32	FDC_FdcCyclesToCpuCycles ( Uint32 FdcCycles )
  * Convert a number of cpu cycles at freq MachineClocks.CPU_Freq to a number
  * of fdc cycles at freq MachineClocks.FDC_Freq (this is the opposite
  * of FDC_FdcCyclesToCpuCycles)
- * TODO : we use a fixed 8 MHz clock and nCpuFreqShift to convert cycles for our
- * internal timers in cycInt.c. This should be replaced some days by using
- * MachineClocks.CPU_Freq and not using nCpuFreqShift anymore.
+ * TODO : we use a fixed 8 MHz clock to convert cycles for our internal timers
+ * in cycInt.c. This should be replaced some days by using MachineClocks.CPU_Freq.
  */
 static Uint32	FDC_CpuCyclesToFdcCycles ( Uint32 CpuCycles )
 {
 	int	FdcCycles;
 
 
-	CpuCycles <<= nCpuFreqShift;				/* Compensate for x2 or x4 cpu speed */
+	CpuCycles >>= nCpuFreqShift;				/* Compensate for x2 or x4 cpu speed */
+
 //	FdcCycles = rint ( ( (Uint64)CpuCycles * MachineClocks.FDC_Freq ) / MachineClocks.CPU_Freq );
 	FdcCycles = rint ( ( (Uint64)CpuCycles * MachineClocks.FDC_Freq ) / 8021247.L );
 
 	/* Our conversion expects FDC_Freq to be nearly the same as CPU_Freq (8 Mhz) */
 	/* but the Falcon uses a 16 MHz clock for the Ajax FDC */
 	/* FIXME : as stated above, this should be handled better, without involving 8 MHz CPU_Freq */
-	if ( ConfigureParams.System.nMachineType == MACHINE_FALCON )
+	if (Config_IsMachineFalcon())
 		FdcCycles /= 2;					/* correct delays for a 8 MHz FDC_Freq clock instead of 16 */
 
 //fprintf ( stderr , "fdc state %d delay %d cpu cycles %d fdc cycles\n" , FDC.Command , CpuCycles , FdcCycles );
@@ -798,13 +816,23 @@ static void	FDC_StartTimer_FdcCycles ( int FdcCycles , int InternalCycleOffset )
 /**
  * Return the number of FDC cycles required to read/write 'nb' bytes
  * This function will always be called when FDC.DriveSelSignal >= 0, as
- * there's no case where we transfer bytes if no drive is enabled. This
- * means we can safely call FDC_GetDensity() here to simulate HD/ED floppies.
+ * there's no case where we transfer bytes if no drive is enabled.
+ * We take "FloppyDensity" into account to simulate faster transfer for HD/ED floppies.
+ *
+ * 2015/10/23 [NP] As seen in the 'Bird Mad Girl Show' demo, it's possible to get
+ * FDC.DriveSelSignal < 0 once a transfer was started (for example, read sector
+ * will complete successfully). So we use DD by default in that case.
  */
 static int	FDC_TransferByte_FdcCycles ( int NbBytes )
 {
 //fprintf ( stderr , "fdc state %d transfer %d bytes\n" , FDC.Command , NbBytes );
-	return ( NbBytes * FDC_DELAY_CYCLE_MFM_BYTE ) / FDC_DRIVES[ FDC.DriveSelSignal ].Density;
+	if ( FDC.DriveSelSignal < 0 )
+	{
+		/* Drive was unselected during the transfer : assume DD for the rest of the bytes */
+		return ( NbBytes * FDC_DELAY_CYCLE_MFM_BYTE ) / FDC_DENSITY_FACTOR_DD;
+	}
+
+	return ( NbBytes * FDC_DELAY_CYCLE_MFM_BYTE ) / FDC_GetFloppyDensity ( FDC.DriveSelSignal );
 }
 
 
@@ -841,10 +869,11 @@ void FDC_Init ( void )
 		FDC_DRIVES[ i ].Enabled = true;
 		FDC_DRIVES[ i ].DiskInserted = false;
 		FDC_DRIVES[ i ].RPM = FDC_RPM_STANDARD * 1000;
-		FDC_DRIVES[ i ].Density = FDC_DENSITY_FACTOR_DD;
+		FDC_DRIVES[ i ].FloppyDensity = FDC_DENSITY_FACTOR_DD;
 		FDC_DRIVES[ i ].HeadTrack = 0;			/* Set all drives to track 0 */
 		FDC_DRIVES[ i ].NumberOfHeads = 2;		/* Double sided drive */
 		FDC_DRIVES[ i ].IndexPulse_Time = 0;
+		FDC_Drive_Set_DC_signal ( i , 0 );
 	}
 
 	FDC_Buffer_Reset();
@@ -892,11 +921,13 @@ void FDC_Reset ( bool bCold )
 	FDC.CommandType = 0;
 	FDC.InterruptCond = 0;
 	FDC.IRQ_Signal = 0;
+	FDC_ClearIRQ();					/* Propagate IRQ signal to MFP GPIP5 */
 
 	FDC.IndexPulse_Counter = 0;
 	for ( i=0 ; i<MAX_FLOPPYDRIVES ; i++ )
 	{
 		FDC_DRIVES[ i ].IndexPulse_Time = 0;	/* Current IP's locations are lost after a reset (motor is now OFF) */
+		FDC_Drive_Set_DC_signal ( i , 0 );
 	}
 
 	FDC_DMA.Status = 1;				/* no DMA error and SectorCount=0 */
@@ -969,6 +1000,11 @@ void FDC_SetDMAStatus ( bool bError )
 int	FDC_DMA_GetModeControl_R_WR ( void )
 {
 	return FDC_DMA.Mode & 0x100;
+}
+
+int FDC_DMA_GetMode(void)
+{
+	return FDC_DMA.Mode;
 }
 
 
@@ -1082,13 +1118,23 @@ Uint8	FDC_DMA_FIFO_Pull ( void )
 			FDC_DMA.BytesInSector = FDC_DMA_SECTOR_SIZE;
 		}
 
-		Byte = FDC_DMA.FIFO [ 0 ];				/* return the 1st byte we just transfered in the FIFO */
+		Byte = FDC_DMA.FIFO [ 0 ];				/* return the 1st byte we just transferred in the FIFO */
 	}
 
 	/* Store the byte that will be written to FDC's Data Register */
 	FDC_DMA.ff8604_recent_val = ( FDC_DMA.ff8604_recent_val & 0xff00 ) | Byte;
 
 	return Byte;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return the value of FDC_DMA.SectorCount (used in floppy_ipf.c)
+ */
+int	FDC_DMA_GetSectorCount ( void )
+{
+	return FDC_DMA.SectorCount;
 }
 
 
@@ -1229,7 +1275,7 @@ static int FDC_GetEmulationMode ( void )
  * So far, we only need to update the index position for the valid
  * drive/floppy ; updating every 500 cycles is enough for this case.
  */
-void	FDC_UpdateAll ( void )
+static void FDC_UpdateAll(void)
 {
 	FDC_IndexPulse_Update ();
 }
@@ -1271,6 +1317,54 @@ void	FDC_Drive_Set_NumberOfHeads ( int Drive , int NbrHeads )
 
 /*-----------------------------------------------------------------------*/
 /**
+ * Get the value of the Disk Change (DC) signal available on pin 34 of some
+ * floppy drives (used in TT emulation) and update the TT GPIP register.
+ *
+ * This signal is active low unless a disk is inserted and a STEP pulse is received
+ * and the drive is selected :
+ *  0 = drive is selected and a disk was ejected (ie drive is empty)
+ *  1 = drive is not selected or a disk was inserted and a step pulse received
+ *
+ * DC signal was only available on the TT machines and in that case it's connected
+ * to the TT MFP on GPIP4 (the signal is inverted before going to GPIP4)
+ */
+static void	FDC_Drive_Connect_DC_signal_GPIP ( int Drive )
+{
+	Uint8	state;
+
+	if ( FDC.DriveSelSignal != Drive )
+		state = 1;						/* drive is not selected */
+	else
+		state = FDC_DRIVES[ Drive ].DiskChange_signal;
+
+	/* DC signal is inverted before going into GPIP4 */
+	if ( state == 1 )
+		state = MFP_GPIP_STATE_LOW;
+	else
+		state = MFP_GPIP_STATE_HIGH;
+
+	MFP_GPIP_Set_Line_Input ( pMFP_TT , MFP_TT_GPIP_LINE_DC , state );
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Update the DC signal for a drive and update GPIP for TT machines
+ *  - set DC=0 when disk is ejected
+ *  - set DC=1 when a step pulse (Type I command) is received and a floppy
+ *    is inserted and the drive is selected
+ */
+static void	FDC_Drive_Set_DC_signal ( int Drive , Uint8 val )
+{
+	FDC_DRIVES[ Drive ].DiskChange_signal = val;
+
+	if ( Config_IsMachineTT() && ( Drive == 0 ) )
+		FDC_Drive_Connect_DC_signal_GPIP ( Drive );
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
  * This function is called when a floppy is inserted in a drive
  * using the UI or command line parameters
  */
@@ -1285,7 +1379,9 @@ void	FDC_InsertFloppy ( int Drive )
 			FDC_IndexPulse_Init ( Drive );			/* init the index pulse's position */
 		else
 			FDC_DRIVES[ Drive ].IndexPulse_Time = 0;	/* Index pulse's position not known yet */
-		FDC_DRIVES[ Drive ].Density = FDC_GetDensity ( Drive );
+
+		/* Update floppy's density for this drive */
+		FDC_UpdateFloppyDensity ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
 	}
 }
 
@@ -1303,6 +1399,9 @@ void	FDC_EjectFloppy ( int Drive )
 	{
 		FDC_DRIVES[ Drive ].DiskInserted = false;
 		FDC_DRIVES[ Drive ].IndexPulse_Time = 0;		/* Stop counting index pulses on an empty drive */
+
+		/* Set the Disk Change signal to "ejected" */
+		FDC_Drive_Set_DC_signal ( Drive , FDC_DC_SIGNAL_EJECTED );
 	}
 }
 
@@ -1362,6 +1461,9 @@ void	FDC_SetDriveSide ( Uint8 io_porta_old , Uint8 io_porta_new )
 	FDC.SideSignal = Side;
 	FDC.DriveSelSignal = Drive;
 
+	/* Update floppy's density for this drive */
+	if ( Drive >= 0 )
+		FDC_UpdateFloppyDensity ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
 
 	/* Also forward change to IPF emulation */
 	IPF_SetDriveSide ( io_porta_old , io_porta_new );
@@ -1411,30 +1513,22 @@ static int FDC_GetSidesPerDisk ( int Drive , int Track )
 
 /*-----------------------------------------------------------------------*/
 /**
- * Return a density factor for the current floppy in a drive
- * A DD track is usually 9 or 10 sectors and has a x1 factor,
- * but to handle HD or ED ST/MSA disk images, we check if we
- * have more than 18 or 36 sectors.
- * In that case, we use a x2 or x4 factor for theses disks,
- * to simulate more bytes per FDC cycles.
+ * Return the number of tracks for the current floppy in a drive
+ * For ST/MSA, this assumes both sides have the same number of tracks
  * Drive should be a valid drive (0 or 1)
  */
-static int FDC_GetDensity ( int Drive )
+static int FDC_GetTracksPerDisk ( int Drive )
 {
 	Uint16	SectorsPerTrack;
+	Uint16	SidesPerDisk;
 
-	if ( EmulationDrives[ Drive ].bDiskInserted )
+	if (EmulationDrives[ Drive ].bDiskInserted)
 	{
-		SectorsPerTrack = FDC_GetSectorsPerTrack ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
-		if ( SectorsPerTrack >= 36 )
-			return FDC_DENSITY_FACTOR_ED;			/* Simulate a ED disk, 36 sectors or more */
-		else if ( SectorsPerTrack >= 18 )
-			return FDC_DENSITY_FACTOR_HD;			/* Simulate a HD disk, between 18 and 36 sectors */
-		else
-			return FDC_DENSITY_FACTOR_DD;			/* Normal DD disk */
+		Floppy_FindDiskDetails ( EmulationDrives[ Drive ].pBuffer , EmulationDrives[ Drive ].nImageBytes , &SectorsPerTrack , &SidesPerDisk );
+		return ( ( EmulationDrives[Drive].nImageBytes / NUMBYTESPERSECTOR ) / SectorsPerTrack ) / SidesPerDisk;
 	}
 	else
-		return FDC_DENSITY_FACTOR_DD;				/* No disk, default to Double Density */
+		return 0;
 }
 
 
@@ -1442,15 +1536,128 @@ static int FDC_GetDensity ( int Drive )
 /**
  * Return the number of bytes in a raw track
  * For ST/MSA disk images, we consider all the tracks have the same size.
- * To simulate HD/ED floppies, we multiply the size by a density factor.
+ * To simulate HD/ED floppies, we multiply the size by a density factor (x2 or x4).
  * Drive should be a valid drive (0 or 1)
  */
-int	FDC_GetBytesPerTrack ( int Drive )
+int	FDC_GetBytesPerTrack ( Uint8 Drive , Uint8 Track , Uint8 Side )
+{
+	int	SectorsPerTrack;
+	int	TrackSize;
+
+	if ( EmulationDrives[ Drive ].bDiskInserted )
+	{
+		/* If the inserted disk is an STX, we use the supplied track length */
+		if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_STX )
+			return FDC_GetBytesPerTrack_STX ( Drive , Track , Side );
+
+		SectorsPerTrack = FDC_GetSectorsPerTrack ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
+		if ( SectorsPerTrack >= 36 )
+			TrackSize =  FDC_TRACK_BYTES_STANDARD * 4;	/* Simulate a ED disk, 36 sectors or more */
+		else if ( SectorsPerTrack >= 18 )
+			TrackSize = FDC_TRACK_BYTES_STANDARD * 2;	/* Simulate a HD disk, between 18 and 36 sectors */
+		else
+			TrackSize = FDC_TRACK_BYTES_STANDARD;		/* Normal DD disk */
+	}
+	else
+		TrackSize = FDC_TRACK_BYTES_STANDARD;			/* No disk, default to DD disk */
+
+	return TrackSize;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return a density factor for the current track/side of the floppy in a drive
+ * A DD track is usually FDC_TRACK_BYTES_STANDARD bytes, a HD track is
+ * twice that number and an ED track is 4 times that number.
+ * As number of bytes can vary slightly depending on mastering process and RPM
+ * speed, we don't use x1, x2 and x4 directly but we use a margin such as x1.5
+ * to choose between DD and HD and x3 to choose between HD and ED
+ *
+ * We return a factor of x1, x2 or x4 for DD, HD or ED
+ * Drive should be a valid drive (0 or 1)
+ */
+static int FDC_ComputeFloppyDensity ( Uint8 Drive , Uint8 Track , Uint8 Side )
 {
 	int	TrackSize;
 
-	TrackSize = FDC_TRACK_BYTES_STANDARD;				/* For a standard DD disk */
-	return TrackSize * FDC_DRIVES[ Drive ].Density;			/* Take density into account for HD/ED floppies */
+	TrackSize = FDC_GetBytesPerTrack ( Drive , Track , Side );
+
+	if ( TrackSize > 3 * FDC_TRACK_BYTES_STANDARD )
+		return FDC_DENSITY_FACTOR_ED;				/* Simulate a ED disk */
+	else if ( TrackSize > 1.5 * FDC_TRACK_BYTES_STANDARD )
+		return FDC_DENSITY_FACTOR_HD;				/* Simulate a HD disk */
+	else
+		return FDC_DENSITY_FACTOR_DD;				/* Normal DD disk */
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Update the density value for the inserted floppy depending on the density
+ * of the current track/side
+ * This function should be called each time track/side are changed and before
+ * reading/writing bytes.
+ */
+static void FDC_UpdateFloppyDensity ( Uint8 Drive , Uint8 Track , Uint8 Side )
+{
+	FDC_DRIVES[ Drive ].FloppyDensity = FDC_ComputeFloppyDensity ( Drive , Track , Side );
+//fprintf ( stderr , "fdc update density drive=%d track=0x%x side=%d density=%d\n" , Drive , Track, Side , FDC_DRIVES[ Drive ].FloppyDensity );
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return the latest Density value set for a drive
+ */
+int	FDC_GetFloppyDensity ( Uint8 Drive )
+{
+	return FDC_DRIVES[ Drive ].FloppyDensity;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Check if the emulated machine can access the floppy in Drive depending
+ * on its density (DD/HD/ED)
+ * - For MegaSTE, TT and Falcon, we use the content of $ff860e to compare the
+ *   floppy's density with the config of the FDC. If density doesn't match,
+ *   the FDC command will abort with RNF error
+ * - For other machines (STF, STE) we consider as a convenience that any
+ *   DD/HD/ED floppy can be accessed, even if this is not the case on real HW
+ *
+ * Return true if the floppy in Drive can be accessed, else false
+ */
+int	FDC_MachineHandleDensity ( Uint8 Drive )
+{
+	bool		res;
+
+	if ( Config_IsMachineMegaSTE() || Config_IsMachineTT() || Config_IsMachineFalcon() )
+	{
+		if ( FDC_DRIVES[ Drive ].FloppyDensity == FDC_DENSITY_FACTOR_DD )
+		{
+			if ( ( FDC.DensityMode & 0x03 ) == 0x00 )	/* FDC is in DD mode ? */
+				res = true;
+			else
+				res = false;
+		}
+		else							/* HD and ED */
+		{
+			if ( ( FDC.DensityMode & 0x03 ) == 0x03 )	/* FDC is in HD mode ? */
+				res = true;
+			else
+				res = false;
+		}
+	}
+
+	else								/* STF, STE */
+		res = true;
+
+	if ( !res )
+		LOG_TRACE(TRACE_FDC, "fdc handle density failed, drive=%d drive_floppy_density=%d, fdc_mode=%d VBL=%d HBL=%d\n" ,
+			Drive , FDC_DRIVES[ Drive ].FloppyDensity , FDC.DensityMode , nVBLs , nHBL );
+
+	return res;
 }
 
 
@@ -1466,8 +1673,10 @@ static Uint32	FDC_GetCyclesPerRev_FdcCycles ( int Drive )
 {
 	Uint32	FdcCyclesPerRev;
 
+	assert(Drive == 0 || Drive == 1);
+
 	/* If the inserted disk is an STX, we use the supplied track length to compute cycles per rev */
-	if ( EmulationDrives[ FDC.DriveSelSignal ].ImageType == FLOPPY_IMAGE_TYPE_STX )
+	if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_STX )
 		return FDC_GetCyclesPerRev_FdcCycles_STX ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
 
 	/* Assume a standard length for all tracks for ST/MSA images */
@@ -1476,7 +1685,7 @@ static Uint32	FDC_GetCyclesPerRev_FdcCycles ( int Drive )
 	/* Our conversion expects FDC_Freq to be nearly the same as CPU_Freq (8 Mhz) */
 	/* but the Falcon uses a 16 MHz clock for the Ajax FDC */
 	/* FIXME : this should be handled better, without involving 8 MHz CPU_Freq */
-	if ( ConfigureParams.System.nMachineType == MACHINE_FALCON )
+	if (Config_IsMachineFalcon())
 		FdcCyclesPerRev /= 2;					/* correct delays for a 8 MHz FDC_Freq clock instead of 16 */
 
 	return FdcCyclesPerRev;
@@ -1496,7 +1705,7 @@ static Uint32	FDC_GetCyclesPerRev_FdcCycles ( int Drive )
  * [NP] TODO : should we have 2 different Index Pulses for each side or do they
  * happen at the same time ?
  */
-void	FDC_IndexPulse_Update ( void )
+static void FDC_IndexPulse_Update(void)
 {
 	Uint32	FdcCyclesPerRev;
 	int	FrameCycles, HblCounterVideo, LineCycles;
@@ -1557,8 +1766,8 @@ static void	FDC_IndexPulse_Init ( int Drive )
 	FDC_DRIVES[ Drive ].IndexPulse_Time = IndexPulse_Time;
 
 	LOG_TRACE(TRACE_FDC, "fdc init index drive=%d side=%d counter=%d ip_time=%"PRIu64" VBL=%d HBL=%d\n" ,
-		  FDC.DriveSelSignal , FDC.SideSignal , FDC.IndexPulse_Counter ,
-		  FDC_DRIVES[ FDC.DriveSelSignal ].IndexPulse_Time , nVBLs , nHBL );
+		  Drive , FDC.SideSignal , FDC.IndexPulse_Counter ,
+		  FDC_DRIVES[ Drive ].IndexPulse_Time , nVBLs , nHBL );
 }
 
 
@@ -1605,7 +1814,7 @@ int	FDC_IndexPulse_GetCurrentPos_NbBytes ( void )
 		return -1;
 //fprintf ( stderr , "fdc index current pos new=%d\n" , FdcCyclesSinceIndex / FDC_DELAY_CYCLE_MFM_BYTE );
 
-	return FdcCyclesSinceIndex * FDC_DRIVES[ FDC.DriveSelSignal ].Density / FDC_DELAY_CYCLE_MFM_BYTE;
+	return FdcCyclesSinceIndex * FDC_GetFloppyDensity ( FDC.DriveSelSignal ) / FDC_DELAY_CYCLE_MFM_BYTE;
 }
 
 
@@ -1670,6 +1879,10 @@ int	FDC_NextIndexPulse_FdcCycles ( void )
  * is received or when the "force interrupt immediate" command is used.
  * This function can also be called from the HDC emulation or from another
  * FDC emulation module (IPF for example)
+ *
+ * NOTE : although high/1 on the IRQ pin of the FDC means an interrupt is
+ * requested, this signal is inverted before going into MFP's GPIP5.
+ * So, we must set the line to low/0 to request an interrupt.
  */
 void FDC_SetIRQ ( Uint8 IRQ_Source )
 {
@@ -1681,8 +1894,7 @@ void FDC_SetIRQ ( Uint8 IRQ_Source )
 	else
 	{
 		/* Acknowledge in MFP circuit, pass bit, enable, pending */
-		MFP_InputOnChannel ( MFP_INT_FDCHDC , 0 );
-		MFP_GPIP &= ~0x20;
+		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_LOW );
 		LOG_TRACE(TRACE_FDC, "fdc set irq 0x%x source 0x%x VBL=%d HBL=%d\n" , FDC.IRQ_Signal , IRQ_Source , nVBLs , nHBL );
 	}
 
@@ -1708,13 +1920,17 @@ void FDC_SetIRQ ( Uint8 IRQ_Source )
  * a "force interrupt immediate" command, the IRQ signal should not be cleared
  * (only command 0xD0 or any new command followed by a read of status reg
  * can clear the forced IRQ)
+ *
+ * NOTE : although low/0 on the IRQ pin of the FDC means interrupt is
+ * cleared, this signal is inverted before going into MFP's GPIP5.
+ * So, we must set the line to high/1 to clear interrupt request.
  */
 void FDC_ClearIRQ ( void )
 {
 	if ( ( FDC.IRQ_Signal & FDC_IRQ_SOURCE_FORCED ) == 0 )
 	{
 		FDC.IRQ_Signal = 0;
-		MFP_GPIP |= 0x20;
+		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_HIGH );
 		LOG_TRACE(TRACE_FDC, "fdc clear irq VBL=%d HBL=%d\n" , nVBLs , nHBL );
 	}
 
@@ -1725,6 +1941,14 @@ void FDC_ClearIRQ ( void )
 	}
 }
 
+void FDC_ClearHdcIRQ(void)
+{
+	FDC.IRQ_Signal &= ~FDC_IRQ_SOURCE_HDC;
+	if (FDC.IRQ_Signal == 0)
+	{
+		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_HIGH );
+	}
+}
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -1878,12 +2102,13 @@ static int FDC_CmdCompleteCommon ( bool DoInt )
  * NOTE [NP] : in the case of Hatari when using ST/MSA images, the track is always the correct one,
  * so the verify will always be good (except if no disk is inserted or the physical head is
  * not on the same track as FDC.TR)
- * This function could be improved to support other images format where logical track
- * could be different from physical track (eg Pasti)
+ * For STX images, verify track might fail on purpose with some protection
  */
 static bool FDC_VerifyTrack ( void )
 {
 	int	FrameCycles, HblCounterVideo, LineCycles;
+	Uint8	Next_TR;
+	Uint8	Next_CRC_OK;
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
@@ -1896,12 +2121,23 @@ static bool FDC_VerifyTrack ( void )
 		return false;
 	}
 
-	/* Most of the time, the physical track and the track register should be the same. */
-	/* Else, it means TR was not correctly set before running the type I command */
-	if ( FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack != FDC.TR )
+	/* Check if the current ID Field is the one we're looking for (same track and correct CRC) */
+	if ( EmulationDrives[ FDC.DriveSelSignal ].ImageType == FLOPPY_IMAGE_TYPE_STX )
 	{
-		LOG_TRACE(TRACE_FDC, "fdc type I verify track failed TR=0x%x head=0x%x drive=%d VBL=%d video_cyc=%d %d@%d pc=%x\n",
-			FDC.TR , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.DriveSelSignal ,
+		Next_TR = FDC_NextSectorID_TR_STX ();
+		Next_CRC_OK = FDC_NextSectorID_CRC_OK_STX ();
+	}
+	else
+	{
+		Next_TR = FDC_NextSectorID_TR_ST ();
+		Next_CRC_OK = FDC_NextSectorID_CRC_OK_ST ();
+	}
+
+	/* ST/MSA image will always be correct, only STX can fail depending on some protections */
+	if ( ( Next_TR != FDC.TR ) || ( Next_CRC_OK == 0 ) )
+	{
+		LOG_TRACE(TRACE_FDC, "fdc type I verify track failed ID_TR=0x%x TR=0x%x crc_ok=%d head=0x%x drive=%d VBL=%d video_cyc=%d %d@%d pc=%x\n",
+			Next_TR , FDC.TR , Next_CRC_OK , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.DriveSelSignal ,
 			nVBLs, FrameCycles, LineCycles, HblCounterVideo, M68000_GetPC());
 
 		return false;
@@ -1941,6 +2177,7 @@ static int FDC_UpdateMotorStop ( void )
 	 case FDCEMU_RUN_MOTOR_STOP:
 		FDC.IndexPulse_Counter = 0;
 		FDC.CommandState = FDCEMU_RUN_MOTOR_STOP_WAIT;
+		/* Continue to next state */
 	 case FDCEMU_RUN_MOTOR_STOP_WAIT:
 		if ( FDC.IndexPulse_Counter < FDC_DELAY_IP_MOTOR_OFF )
 		{
@@ -2011,7 +2248,8 @@ static int FDC_UpdateRestoreCmd ( void )
 		/* can't be interrupted anymore by another command (else TR value will be wrong */
 		/* for other type I commands) */
 		FDC.TR = 0xff;				
-		FDC.CommandState = FDCEMU_RUN_RESTORE_SEEKTOTRACKZERO_LOOP;	/* continue in the _LOOP state */
+		FDC.CommandState = FDCEMU_RUN_RESTORE_SEEKTOTRACKZERO_LOOP;
+		/* Continue in the _LOOP state */
 	 case FDCEMU_RUN_RESTORE_SEEKTOTRACKZERO_LOOP:
 		if ( FDC.TR == 0 )					/* Track 0 not reached after 255 attempts ? */
 		{							/* (this can happen if the drive is disabled) */
@@ -2027,7 +2265,10 @@ static int FDC_UpdateRestoreCmd ( void )
 			FDC_Update_STR ( FDC_STR_BIT_TR00 , 0 );	/* Unset bit TR00 */
 			FDC.TR--;					/* One less attempt */
 			if ( ( FDC.DriveSelSignal >= 0 ) && ( FDC_DRIVES[ FDC.DriveSelSignal ].Enabled ) )
+			{
 				FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack--;	/* Move physical head only if an enabled drive is selected */
+				FDC_UpdateFloppyDensity ( FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal );
+			}
 			FdcCycles = FDC_DelayToFdcCycles ( FDC_StepRate_ms[ FDC_STEP_RATE ] * 1000 );
 		}
 		else							/* Drive is enabled and head is at track 0 */
@@ -2052,6 +2293,7 @@ static int FDC_UpdateRestoreCmd ( void )
 		break;
 	 case FDCEMU_RUN_RESTORE_VERIFY_HEAD_OK:
 		FDC.IndexPulse_Counter = 0;
+		/* Head OK, continue and look for sector header */
 	 case FDCEMU_RUN_RESTORE_VERIFY_NEXT_SECTOR_HEADER:
 		/* If 'verify' doesn't succeed after 5 revolutions, we abort with RNF */
 		if ( FDC.IndexPulse_Counter >= FDC_DELAY_IP_ADDRESS_ID )
@@ -2075,6 +2317,7 @@ static int FDC_UpdateRestoreCmd ( void )
 					FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal );
 		if ( FdcCycles < 0 )
 		{
+			FDC.CommandState = FDCEMU_RUN_RESTORE_VERIFY_NEXT_SECTOR_HEADER;
 			FdcCycles = FDC_DELAY_CYCLE_WAIT_NO_DRIVE_FLOPPY;	/* Wait for a valid drive/floppy */
 		}
 		else
@@ -2180,7 +2423,10 @@ static int FDC_UpdateSeekCmd ( void )
 				}
 
 				else
+				{
 					FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack += FDC.StepDirection;	/* Move physical head */
+					FDC_UpdateFloppyDensity ( FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal );
+				}
 
 				if ( FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack == 0 )
 					FDC_Update_STR ( 0 , FDC_STR_BIT_TR00 );	/* Set bit TR00 */
@@ -2202,6 +2448,7 @@ static int FDC_UpdateSeekCmd ( void )
 		break;
 	 case FDCEMU_RUN_SEEK_VERIFY_HEAD_OK:
 		FDC.IndexPulse_Counter = 0;
+		/* Head OK, continue and look for sector header */
 	 case FDCEMU_RUN_SEEK_VERIFY_NEXT_SECTOR_HEADER:
 		/* If 'verify' doesn't succeed after 5 revolutions, we abort with RNF */
 		if ( FDC.IndexPulse_Counter >= FDC_DELAY_IP_ADDRESS_ID )
@@ -2225,6 +2472,7 @@ static int FDC_UpdateSeekCmd ( void )
 					FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal );
 		if ( FdcCycles < 0 )
 		{
+			FDC.CommandState = FDCEMU_RUN_SEEK_VERIFY_NEXT_SECTOR_HEADER;
 			FdcCycles = FDC_DELAY_CYCLE_WAIT_NO_DRIVE_FLOPPY;	/* Wait for a valid drive/floppy */
 		}
 		else
@@ -2312,7 +2560,10 @@ static int FDC_UpdateStepCmd ( void )
 				FdcCycles = FDC_DELAY_CYCLE_COMMAND_IMMEDIATE;	/* No delay if trying to go before track 0 */
 
 			else
+			{
 				FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack += FDC.StepDirection;	/* Move physical head */
+				FDC_UpdateFloppyDensity ( FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal );
+			}
 
 			if ( FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack == 0 )
 				FDC_Update_STR ( 0 , FDC_STR_BIT_TR00 );	/* Set bit TR00 */
@@ -2334,6 +2585,7 @@ static int FDC_UpdateStepCmd ( void )
 		break;
 	 case FDCEMU_RUN_STEP_VERIFY_HEAD_OK:
 		FDC.IndexPulse_Counter = 0;
+		/* Head OK, continue and look for sector header */
 	 case FDCEMU_RUN_STEP_VERIFY_NEXT_SECTOR_HEADER:
 		/* If 'verify' doesn't succeed after 5 revolutions, we abort with RNF */
 		if ( FDC.IndexPulse_Counter >= FDC_DELAY_IP_ADDRESS_ID )
@@ -2357,6 +2609,7 @@ static int FDC_UpdateStepCmd ( void )
 					FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal );
 		if ( FdcCycles < 0 )
 		{
+			FDC.CommandState = FDCEMU_RUN_STEP_VERIFY_NEXT_SECTOR_HEADER;
 			FdcCycles = FDC_DELAY_CYCLE_WAIT_NO_DRIVE_FLOPPY;	/* Wait for a valid drive/floppy */
 		}
 		else
@@ -2651,6 +2904,9 @@ static int FDC_UpdateWriteSectorsCmd ( void )
 	 case FDCEMU_RUN_WRITESECTORS_WRITEDATA_MOTOR_ON:
 		FDC.ReplaceCommandPossible = false;
 		FDC.IndexPulse_Counter = 0;
+		FDC.CommandState = FDCEMU_RUN_WRITESECTORS_WRITEDATA_NEXT_SECTOR_HEADER;
+		FdcCycles = FDC_DELAY_CYCLE_COMMAND_IMMEDIATE;
+		break;
 	 case FDCEMU_RUN_WRITESECTORS_WRITEDATA_NEXT_SECTOR_HEADER:
 		/* If we're looking for sector FDC.SR for more than 5 revolutions, we abort with RNF */
 		if ( FDC.IndexPulse_Counter >= FDC_DELAY_IP_ADDRESS_ID )
@@ -2969,15 +3225,16 @@ static int FDC_UpdateReadTrackCmd ( void )
 		/* At this point, we have a valid drive/floppy, build the track data */
 		FDC_Buffer_Reset();
 
-		if ( ( FDC.SideSignal == 1 )				/* Try to read side 1 on a disk that doesn't have 2 sides or drive is single sided */
+		if ( ( ( FDC.SideSignal == 1 )				/* Try to read side 1 on a disk that doesn't have 2 sides or drive is single sided */
 			&& ( ( FDC_GetSidesPerDisk ( FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack ) != 2 )
 			  || ( FDC_DRIVES[ FDC.DriveSelSignal ].NumberOfHeads == 1 ) ) )
+		    || ( FDC_MachineHandleDensity ( FDC.DriveSelSignal ) == false ) ) 	/* Can't handle the floppy's density */
 		{
-			LOG_TRACE(TRACE_FDC, "fdc type III read track drive=%d track=%d side=%d, side not found VBL=%d video_cyc=%d %d@%d pc=%x\n",
+			LOG_TRACE(TRACE_FDC, "fdc type III read track drive=%d track=%d side=%d, side not found or wrong density VBL=%d video_cyc=%d %d@%d pc=%x\n",
 				  FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal ,
 				  nVBLs, FrameCycles, LineCycles, HblCounterVideo, M68000_GetPC());
 
-			for ( i=0 ; i<FDC_GetBytesPerTrack ( FDC.DriveSelSignal ) ; i++ )
+			for ( i=0 ; i<FDC_GetBytesPerTrack ( FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal ) ; i++ )
 				FDC_Buffer_Add ( rand() & 0xff );	/* Fill the track buffer with random bytes */
 		}
 		else if ( EmulationDrives[ FDC.DriveSelSignal ].ImageType == FLOPPY_IMAGE_TYPE_STX )
@@ -3071,6 +3328,16 @@ static int FDC_UpdateWriteTrackCmd ( void )
 		}
 		break;
 	 case FDCEMU_RUN_WRITETRACK_INDEX:
+		if ( FDC_MachineHandleDensity ( FDC.DriveSelSignal ) == false )	/* Can't handle the floppy's density */
+		{
+			LOG_TRACE(TRACE_FDC, "fdc type III write track drive=%d track=0x%x side=%d wrong density VBL=%d video_cyc=%d %d@%d pc=%x\n",
+				  FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal , nVBLs, FrameCycles, LineCycles, HblCounterVideo, M68000_GetPC());
+
+			FDC_Update_STR ( 0 , FDC_STR_BIT_LOST_DATA );	/* Set LOST_DATA bit */
+			FdcCycles = FDC_CmdCompleteCommon( true );
+			break;
+		}
+
 		/* At this point, we have a valid drive/floppy, check write protection and write the track data */
 		if ( Floppy_IsWriteProtected ( FDC.DriveSelSignal ) )
 		{
@@ -3085,7 +3352,7 @@ static int FDC_UpdateWriteTrackCmd ( void )
 		FDC_Update_STR ( FDC_STR_BIT_WPRT , 0 );		/* Unset WPRT bit */
 
 		FDC_Buffer_Reset();
-		FDC_DMA.BytesToTransfer = FDC_GetBytesPerTrack ( FDC.DriveSelSignal );
+		FDC_DMA.BytesToTransfer = FDC_GetBytesPerTrack ( FDC.DriveSelSignal , FDC_DRIVES[ FDC.DriveSelSignal ].HeadTrack , FDC.SideSignal );
 
 		FDC.CommandState = FDCEMU_RUN_WRITETRACK_TRANSFER_LOOP;
 		FdcCycles = FDC_DELAY_CYCLE_COMMAND_IMMEDIATE;
@@ -3189,7 +3456,7 @@ static int FDC_TypeI_Restore(void)
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	LOG_TRACE(TRACE_FDC, "fdc type I restore spinup=%s verify=%s steprate=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
+	LOG_TRACE(TRACE_FDC, "fdc type I restore spinup=%s verify=%s steprate_ms=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
 		  ( FDC.CR & FDC_COMMAND_BIT_SPIN_UP ) ? "off" : "on" ,
 		  ( FDC.CR & FDC_COMMAND_BIT_VERIFY ) ? "on" : "off" ,
 		  FDC_StepRate_ms[ FDC_STEP_RATE ] ,
@@ -3213,7 +3480,7 @@ static int FDC_TypeI_Seek ( void )
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	LOG_TRACE(TRACE_FDC, "fdc type I seek dest_track=0x%x spinup=%s verify=%s steprate=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
+	LOG_TRACE(TRACE_FDC, "fdc type I seek dest_track=0x%x spinup=%s verify=%s steprate_ms=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
 		  FDC.DR,
 		  ( FDC.CR & FDC_COMMAND_BIT_SPIN_UP ) ? "off" : "on" ,
 		  ( FDC.CR & FDC_COMMAND_BIT_VERIFY ) ? "on" : "off" ,
@@ -3238,7 +3505,7 @@ static int FDC_TypeI_Step ( void )
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	LOG_TRACE(TRACE_FDC, "fdc type I step %d spinup=%s verify=%s steprate=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
+	LOG_TRACE(TRACE_FDC, "fdc type I step %d spinup=%s verify=%s steprate_ms=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
 		  FDC.StepDirection,
 		  ( FDC.CR & FDC_COMMAND_BIT_SPIN_UP ) ? "off" : "on" ,
 		  ( FDC.CR & FDC_COMMAND_BIT_VERIFY ) ? "on" : "off" ,
@@ -3263,7 +3530,7 @@ static int FDC_TypeI_StepIn(void)
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	LOG_TRACE(TRACE_FDC, "fdc type I step in spinup=%s verify=%s steprate=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
+	LOG_TRACE(TRACE_FDC, "fdc type I step in spinup=%s verify=%s steprate_ms=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
 		  ( FDC.CR & FDC_COMMAND_BIT_SPIN_UP ) ? "off" : "on" ,
 		  ( FDC.CR & FDC_COMMAND_BIT_VERIFY ) ? "on" : "off" ,
 		  FDC_StepRate_ms[ FDC_STEP_RATE ] ,
@@ -3288,7 +3555,7 @@ static int FDC_TypeI_StepOut ( void )
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	LOG_TRACE(TRACE_FDC, "fdc type I step out spinup=%s verify=%s steprate=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
+	LOG_TRACE(TRACE_FDC, "fdc type I step out spinup=%s verify=%s steprate_ms=%d drive=%d tr=0x%x head_track=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
 		  ( FDC.CR & FDC_COMMAND_BIT_SPIN_UP ) ? "off" : "on" ,
 		  ( FDC.CR & FDC_COMMAND_BIT_VERIFY ) ? "on" : "off" ,
 		  FDC_StepRate_ms[ FDC_STEP_RATE ] ,
@@ -3529,6 +3796,13 @@ static int FDC_ExecuteTypeICommands ( void )
 		break;
 	}
 
+
+	/* After a "STEP" command we set the Disk Change signal to "inserted" */
+	/* if the drive is selected and a floppy is inserted */
+	if ( ( FDC.DriveSelSignal >= 0 ) && ( FDC_DRIVES[ FDC.DriveSelSignal ].DiskInserted == true ) )
+		FDC_Drive_Set_DC_signal ( FDC.DriveSelSignal , FDC_DC_SIGNAL_INSERTED );
+
+
 	return FdcCycles;
 }
 
@@ -3669,10 +3943,13 @@ static void FDC_WriteSectorCountRegister ( void )
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	LOG_TRACE(TRACE_FDC, "fdc write 8604 dma sector count=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
-		  IoMem_ReadByte(0xff8605), nVBLs, FrameCycles, LineCycles, HblCounterVideo, M68000_GetPC());
+	FDC_DMA.SectorCount = IoMem_ReadWord(0xff8604);
+	if (!Config_IsMachineFalcon())
+		FDC_DMA.SectorCount &= 0xff;
 
-	FDC_DMA.SectorCount = IoMem_ReadByte(0xff8605);
+	LOG_TRACE(TRACE_FDC, "fdc write 8604 dma sector count=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n",
+	          FDC_DMA.SectorCount, nVBLs, FrameCycles, LineCycles, HblCounterVideo, M68000_GetPC());
+
 }
 
 
@@ -3810,7 +4087,7 @@ void FDC_DiskController_WriteWord ( void )
 	if ( nIoMemAccessSize == SIZE_BYTE )
 	{
 		/* This register does not like to be accessed in byte mode on a normal ST */
-		M68000_BusError(IoAccessBaseAddress, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return;
 	}
 
@@ -3894,10 +4171,10 @@ void FDC_DiskControllerStatus_ReadWord ( void )
 	int EmulationMode;
 	int FDC_reg;
 
-	if (nIoMemAccessSize == SIZE_BYTE)
+	if (nIoMemAccessSize == SIZE_BYTE && !Config_IsMachineFalcon())
 	{
 		/* This register does not like to be accessed in byte mode on a normal ST */
-		M68000_BusError(IoAccessBaseAddress, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return;
 	}
 
@@ -4059,7 +4336,7 @@ void FDC_DmaModeControl_WriteWord ( void )
 	if (nIoMemAccessSize == SIZE_BYTE)
 	{
 		/* This register does not like to be accessed in byte mode on a normal ST */
-		M68000_BusError(IoAccessBaseAddress, BUS_ERROR_WRITE);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_WRITE, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return;
 	}
 
@@ -4076,6 +4353,9 @@ void FDC_DmaModeControl_WriteWord ( void )
 	/* When write to 0xff8606, check bit '8' toggle. This causes DMA status reset */
 	if ((Mode_prev ^ FDC_DMA.Mode) & 0x0100)
 		FDC_ResetDMA();
+
+	if ((Mode_prev & 0xc0) != 0 && (FDC_DMA.Mode & 0xc0) == 0)
+		HDC_DmaTransfer();
 }
 
 
@@ -4103,10 +4383,10 @@ void FDC_DmaModeControl_WriteWord ( void )
  */
 void FDC_DmaStatus_ReadWord ( void )
 {
-	if (nIoMemAccessSize == SIZE_BYTE)
+	if (nIoMemAccessSize == SIZE_BYTE && !Config_IsMachineFalcon())
 	{
 		/* This register does not like to be accessed in byte mode on a normal ST */
-		M68000_BusError(IoAccessBaseAddress, BUS_ERROR_READ);
+		M68000_BusError(IoAccessFullAddress, BUS_ERROR_READ, BUS_ERROR_SIZE_BYTE, BUS_ERROR_ACCESS_DATA, 0);
 		return;
 	}
 
@@ -4142,48 +4422,69 @@ void	FDC_DmaAddress_ReadByte ( void )
 /*-----------------------------------------------------------------------*/
 /**
  * Write hi/med/low DMA address byte at $ff8609/0b/0d
+ *
+ * NOTE [NP] : as described by Ijor in http://atari-forum.com/viewtopic.php?f=16&t=30289
+ * the STF DMA address counter uses a ripple carry adder that will increment middle byte
+ * when bit 7 of lower byte goes from 1 to 0 (same for middle/high bytes)
+ * To avoid possible error with this carry, DMA address bytes should be written in the order
+ * low, middle, high (as specified by Atari documentations) and not high/middle/low
  */
 void	FDC_DmaAddress_WriteByte ( void )
 {
+	Uint32 Address;
+	Uint32 Address_old;
 	int FrameCycles, HblCounterVideo, LineCycles;
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	/* On STF/STE machines limited to 4MB of RAM, DMA address is also limited to $3fffff */
-	if ( ( IoAccessCurrentAddress == 0xff8609 )
-	  && ( (ConfigureParams.System.nMachineType == MACHINE_ST)
-	    || (ConfigureParams.System.nMachineType == MACHINE_STE)
-	    || (ConfigureParams.System.nMachineType == MACHINE_MEGA_STE) ) )
-		IoMem[ 0xff8609 ] &= 0x3f;
-
-	/* DMA address must be word-aligned, bit 0 at $ff860d is always 0 */
-	if ( IoAccessCurrentAddress == 0xff860d )
-		IoMem[ 0xff860d ] &= 0xfe;
-
-	LOG_TRACE(TRACE_FDC, "fdc write dma address %x val=0x%02x address=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
-		IoAccessCurrentAddress , IoMem[ IoAccessCurrentAddress ] , FDC_GetDMAAddress() ,
+	LOG_TRACE(TRACE_FDC, "fdc write dma address %x val=0x%02x VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
+		IoAccessCurrentAddress , IoMem[ IoAccessCurrentAddress ] ,
 		nVBLs , FrameCycles, LineCycles, HblCounterVideo , M68000_GetPC() );
-}
-
-
-/*-----------------------------------------------------------------------*/
-/**
- * Get DMA address used to transfer data between FDC and RAM
- */
-Uint32 FDC_GetDMAAddress(void)
-{
-	Uint32 Address;
 
 	/* Build up 24-bit address from hardware registers */
 	Address = ((Uint32)STMemory_ReadByte(0xff8609)<<16) | ((Uint32)STMemory_ReadByte(0xff860b)<<8) | (Uint32)STMemory_ReadByte(0xff860d);
 
-	return Address;
+	/* On STF, DMA address uses a "ripple carry adder" which can trigger when writing to $ff860b/0d */
+	if ( Config_IsMachineST() )
+	{
+		Address_old = FDC_GetDMAAddress();
+
+		if ( ( Address_old & 0x80 ) && !( Address & 0x80 ) )		/* Bit 7 goes from 1 to 0 */
+		{
+			Address += 0x100;					/* Increase middle byte (and high byte if needed) */
+//fprintf ( stderr , "fdc write dma address detect ripple carry at $ff860d old=0x%x new=0x%x\n" , Address_old , Address );
+			LOG_TRACE(TRACE_FDC, "fdc write dma address detect ripple carry at $ff860d old=0x%x new=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
+				Address_old , Address ,
+				nVBLs , FrameCycles, LineCycles, HblCounterVideo , M68000_GetPC() );
+		}
+		else if ( ( Address_old & 0x8000 ) && !( Address & 0x8000 ) )	/* Bit 15 goes from 1 to 0 */
+		{
+			Address += 0x10000;					/* Increase high byte */
+//fprintf ( stderr , "fdc write dma address detect ripple carry at $ff860b old=0x%x new=0x%x\n" , Address_old , Address );
+			LOG_TRACE(TRACE_FDC, "fdc write dma address detect ripple carry at $ff860b old=0x%x new=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
+				Address_old , Address ,
+				nVBLs , FrameCycles, LineCycles, HblCounterVideo , M68000_GetPC() );
+		}
+	}
+
+	/* Store new address as DMA address and update $ff8609/0b/0d */
+	FDC_WriteDMAAddress ( Address );
 }
 
 
 /*-----------------------------------------------------------------------*/
 /**
- * Write a new address to the FDC DMA address registers at $ff8909/0b/0d
+ * Get DMA address used to transfer data between FDC/HDC and RAM
+ */
+Uint32 FDC_GetDMAAddress(void)
+{
+	return FDC_DMA.Address;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Write a new address to the FDC/HDC DMA address registers at $ff8909/0b/0d
  * As verified on real STF, DMA address high byte written at $ff8609 is masked
  * with 0x3f :
  *	move.b #$ff,$ff8609
@@ -4195,24 +4496,23 @@ Uint32 FDC_GetDMAAddress(void)
 void FDC_WriteDMAAddress ( Uint32 Address )
 {
 	int FrameCycles, HblCounterVideo, LineCycles;
+	Uint32 dma_mask;
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
-	LOG_TRACE(TRACE_FDC, "fdc write 0x%x to dma address VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
+	LOG_TRACE(TRACE_FDC, "fdc write dma address new=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
 		Address , nVBLs , FrameCycles, LineCycles, HblCounterVideo , M68000_GetPC() );
 
-	/* On STF/STE machines limited to 4MB of RAM, DMA address is also limited to $3fffff */
-	if ( (ConfigureParams.System.nMachineType == MACHINE_ST)
-	  || (ConfigureParams.System.nMachineType == MACHINE_STE)
-	  || (ConfigureParams.System.nMachineType == MACHINE_MEGA_STE) )
-		Address &= 0x3fffff;
-
-	Address &= 0xfffffffe;						/* Force bit 0 to 0 */
+	/* Mask DMA address : */
+	/*  - DMA address must be word-aligned, bit 0 at $ff860d is always 0 */
+	/*  - On STF/STE machines limited to 4MB of RAM, DMA address is also limited to $3fffff */
+	dma_mask = 0xff00fffe | ( DMA_MaskAddressHigh() << 16 );		/* Force bit 0 to 0 */
+	FDC_DMA.Address = Address & dma_mask;
 
 	/* Store as 24-bit address */
-	STMemory_WriteByte(0xff8609, Address>>16);
-	STMemory_WriteByte(0xff860b, Address>>8);
-	STMemory_WriteByte(0xff860d, Address);
+	STMemory_WriteByte(0xff8609, FDC_DMA.Address>>16);
+	STMemory_WriteByte(0xff860b, FDC_DMA.Address>>8);
+	STMemory_WriteByte(0xff860d, FDC_DMA.Address);
 }
 
 
@@ -4223,7 +4523,7 @@ void FDC_WriteDMAAddress ( Uint32 Address )
  * If no ID Field is found before the end of the track, we use the 1st
  * ID Field of the track (which simulates a full spin of the floppy).
  * We also store the next sector's number into NextSector_ID_Field_SR,
- * the next track's number into NextSector_ID_Field_TR, the next sector's lenght
+ * the next track's number into NextSector_ID_Field_TR, the next sector's length
  * into NextSector_ID_Field_LEN and if the CRC is correct or not into
  * NextSector_ID_Field_CRC_OK.
  * This function assumes some 512 byte sectors stored in ascending
@@ -4246,6 +4546,12 @@ static int	FDC_NextSectorID_FdcCycles_ST ( Uint8 Drive , Uint8 NumberOfHeads , U
 	if ( ( Side == 1 ) && ( NumberOfHeads == 1 ) )			/* Can't read side 1 on a single sided drive */
 		return -1;
 
+	if ( Track >= FDC_GetTracksPerDisk ( Drive ) )			/* Try to access a non existing track */
+		return -1;
+
+	if ( FDC_MachineHandleDensity ( Drive ) == false )		/* Can't handle the floppy's density */
+		return -1;
+
 	MaxSector = FDC_GetSectorsPerTrack ( Drive , Track , Side );
 	TrackPos = FDC_TRACK_LAYOUT_STANDARD_GAP1;			/* Position of 1st raw sector */
 	TrackPos += FDC_TRACK_LAYOUT_STANDARD_GAP2;			/* Position of ID Field in 1st raw sector */
@@ -4262,7 +4568,7 @@ static int	FDC_NextSectorID_FdcCycles_ST ( Uint8 Drive , Uint8 NumberOfHeads , U
 	if ( i == MaxSector )						/* CurrentPos is after the last ID Field of this track */
 	{
 		/* Reach end of track (new index pulse), then go to sector 1 */
-		NbBytes = FDC_GetBytesPerTrack ( Drive ) - CurrentPos + FDC_TRACK_LAYOUT_STANDARD_GAP1 + FDC_TRACK_LAYOUT_STANDARD_GAP2;
+		NbBytes = FDC_GetBytesPerTrack ( Drive , Track , Side ) - CurrentPos + FDC_TRACK_LAYOUT_STANDARD_GAP1 + FDC_TRACK_LAYOUT_STANDARD_GAP2;
 		NextSector = 1;
 	}
 	else								/* There's an ID Field before end of track */
@@ -4418,6 +4724,14 @@ static Uint8 FDC_ReadAddress_ST ( Uint8 Drive , Uint8 Track , Uint8 Sector , Uin
 
 	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
+	/* If trying to access address field on a non existing track, then return RNF */
+	if ( Track >= FDC_GetTracksPerDisk ( Drive ) )
+	{
+		fprintf ( stderr , "fdc : read address drive=%d track=%d side=%d, but maxtrack=%d, return RNF\n" ,
+			Drive , Track , Side , FDC_GetTracksPerDisk ( Drive ) );
+		return STX_SECTOR_FLAG_RNF;				/* Should not happen if FDC_NextSectorID_FdcCycles_ST succeeded before */
+	}
+
 	p = buf_id;
 
 	*p++ = 0xa1;							/* SYNC bytes and IAM byte are included in the CRC */
@@ -4471,6 +4785,15 @@ static Uint8 FDC_ReadTrack_ST ( Uint8 Drive , Uint8 Track , Uint8 Side )
 	LOG_TRACE(TRACE_FDC, "fdc type III read track drive=%d track=%d side=%d VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
 		Drive, Track, Side, nVBLs , FrameCycles, LineCycles, HblCounterVideo , M68000_GetPC() );
 
+	/* If trying to access a non existing track, then return an empty / not formatted track */
+	if ( Track >= FDC_GetTracksPerDisk ( Drive ) )
+	{
+		fprintf ( stderr , "fdc : read track drive=%d track=%d side=%d, but maxtrack=%d, building an unformatted track\n" ,
+			Drive , Track , Side , FDC_GetTracksPerDisk ( Drive ) );
+		for ( i=0 ; i<FDC_GetBytesPerTrack ( Drive , Track , Side ) ; i++ )
+			FDC_Buffer_Add ( rand() & 0xff );		/* Fill the track buffer with random bytes */
+		return 0;
+	}
 
 	for ( i=0 ; i<FDC_TRACK_LAYOUT_STANDARD_GAP1 ; i++ )		/* GAP1 */
 		FDC_Buffer_Add ( 0x4e );
@@ -4537,7 +4860,7 @@ static Uint8 FDC_ReadTrack_ST ( Uint8 Drive , Uint8 Track , Uint8 Side )
 			FDC_Buffer_Add ( 0x4e );
 	}
 
-	while ( FDC_Buffer_Get_Size () < FDC_GetBytesPerTrack ( Drive ) )	/* Complete the track buffer */
+	while ( FDC_Buffer_Get_Size () < FDC_GetBytesPerTrack ( Drive , Track , Side ) )	/* Complete the track buffer */
 	      FDC_Buffer_Add ( 0x4e );					/* GAP5 */
 
 	return 0;							/* No error */
@@ -4578,48 +4901,59 @@ static Uint8 FDC_WriteTrack_ST ( Uint8 Drive , Uint8 Track , Uint8 Side , int Tr
 
 /*-----------------------------------------------------------------------*/
 /**
- * Write to floppy mode/control (?) register (0xff860F).
- * Used on Falcon only!
- * FIXME: I've found hardly any documentation about this register, only
- * the following description of the bits:
+ * Write word to density mode register to choose between DD/HD behaviour for the FDC
+ * Used on MegaSTE, TT and Falcon
  *
- *   __________54__10  Floppy Controll-Register
- *             ||  ||
- *             ||  |+- Prescaler 1
- *             ||  +-- Media detect 1
- *             |+----- Prescaler 2
- *             +------ Media detect 2
+ *   ______________10  Density Control Register
+ *                 ||
+ *                 |+- FDC Frequency 0:8MHz 1:16MHz
+ *                 +-- Density 0:DD 1:HD
  *
- * For DD - disks:  0x00
- * For HD - disks:  0x03
- * for ED - disks:  0x30 (not supported by TOS)
+ * For DD disks:  0x00
+ * For HD disks:  0x03
  */
-void FDC_FloppyMode_WriteByte ( void )
+void FDC_DensityMode_WriteWord ( void )
 {
-	// printf("Write to floppy mode reg.: 0x%02x\n", IoMem_ReadByte(0xff860f));
+	int FrameCycles, HblCounterVideo, LineCycles;
+
+
+	M68000_WaitState(4);			/* TODO : check on real HW */
+
+	FDC.DensityMode = IoMem_ReadWord(0xff860e);
+
+	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
+
+	LOG_TRACE(TRACE_FDC, "fdc write 860e density=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
+		FDC.DensityMode , nVBLs , FrameCycles, LineCycles, HblCounterVideo , M68000_GetPC() );
 }
 
 
 /*-----------------------------------------------------------------------*/
 /**
- * Read from floppy mode/control (?) register (0xff860F).
- * Used on Falcon only!
- * FIXME: I've found hardly any documentation about this register, only
- * the following description of the bits:
+ * Read word from density mode register to choose between DD/HD behaviour for the FDC
+ * Used on MegaSTE, TT and Falcon
  *
- *   ________76543210  Floppy Controll-Register
- *           ||||||||
- *           |||||||+- Prescaler 1
- *           ||||||+-- Mode select 1
- *           |||||+--- Media detect 1
- *           ||||+---- accessed during DMA transfers (?)
- *           |||+----- Prescaler 2
- *           ||+------ Mode select 2
- *           |+------- Media detect 2
- *           +-------- Disk changed
+ *   ______________10  Density Control Register
+ *                 ||
+ *                 |+- FDC Frequency 0:8MHz 1:16MHz
+ *                 +-- Density 0:DD 1:HD
+ *
+ * For DD disks:  0x00
+ * For HD disks:  0x03
  */
-void FDC_FloppyMode_ReadByte ( void )
+void FDC_DensityMode_ReadWord ( void )
 {
-	IoMem_WriteByte(0xff860f, 0x80);  // FIXME: Is this ok?
-	// printf("Read from floppy mode reg.: 0x%02x\n", IoMem_ReadByte(0xff860f));
+	int FrameCycles, HblCounterVideo, LineCycles;
+
+
+	M68000_WaitState(4);			/* TODO : check on real HW */
+
+	Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
+
+	LOG_TRACE(TRACE_FDC, "fdc read 860e density=0x%x VBL=%d video_cyc=%d %d@%d pc=%x\n" ,
+		FDC.DensityMode , nVBLs , FrameCycles, LineCycles, HblCounterVideo , M68000_GetPC() );
+
+	IoMem_WriteWord( 0xff860e , FDC.DensityMode );
 }
+
+

@@ -6,7 +6,7 @@
 
   Show information about the program and its license.
 */
-const char DlgAbout_fileid[] = "Hatari dlgAbout.c : " __DATE__ " " __TIME__;
+const char DlgAbout_fileid[] = "Hatari dlgAbout.c";
 
 #include "main.h"
 #include "version.h"
@@ -36,7 +36,7 @@ static SGOBJ aboutdlg[] =
 	{ SGTEXT, 0, 0, 1,19, 38,1, "WITHOUT ANY WARRANTY. See the GNU Ge-" },
 	{ SGTEXT, 0, 0, 1,20, 38,1, "neral Public License for more details." },
 	{ SGBUTTON, SG_DEFAULT, 0, 16,23, 8,1, "OK" },
-	{ -1, 0, 0, 0,0, 0,0, NULL }
+	{ SGSTOP, 0, 0, 0,0, 0,0, NULL }
 };
 
 
@@ -57,5 +57,5 @@ void Dialog_AboutDlg(void)
 	aboutdlg[1].x = (aboutdlg[0].w - strlen(aboutstr)) / 2;
 
 	SDLGui_CenterDlg(aboutdlg);
-	SDLGui_DoDialog(aboutdlg, NULL);
+	SDLGui_DoDialog(aboutdlg, NULL,false);
 }

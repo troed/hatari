@@ -10,17 +10,42 @@ text, see end of the text. Most of the distros should have in their
 repositories packages at least for some of them though.
 
 Contents:
-- Using a soundcard with built-in MIDI synthesis capability 
+- Quick start
+- Using a soundcard with built-in MIDI synthesis capability
 - Making MIDI soft-synthetizer to work with ALSA
 - Using FluidSynth instead of Timidity
 - Other software synthetizers
 - Making it all to work with Hatari
-- MIDI and networking
+- Forwarding MIDI over network
 - Linux & Atari MIDI related software
 - Additional documentation
 
 
-Using a soundcard with built-in MIDI synthesis capability 
+Quick start
+-----------
+
+*If* Hatari is built with PortMidi, getting MIDI output from Hatari is
+simple.
+
+Just start a MIDI software synthetizer (on Debian/Ubuntu):
+$ sudo apt install qsynth
+$ qsynth
+
+(Hatari scans for ALSA MIDI devices only at start, so the MIDI output
+and input devices need to be there before starting Hatari.)
+
+Then start Hatari, and in the "Devices" option screen, select "Enable
+MIDI emulation" and for the "output" option, select "Synth input
+port".
+
+That's all!
+
+Rest of this document is about lower level MIDI (raw device) access
+without PortMidi, Linux MIDI usage in general, and notes of some
+useful Open Source MIDI software available on Linux.
+
+
+Using a soundcard with built-in MIDI synthesis capability
 ---------------------------------------------------------
 
 If your soundcard is capable of playing MIDI sound (i.e. you can play a .mid
@@ -106,9 +131,9 @@ as it has pretty good organ sound, but it needs Jack connection kit
 Making it all to work with Hatari
 ---------------------------------
 
-Hatari requires midi hardware devices to work, it doesn't support
-ALSA directly.  To get the software synth ALSA devices to appear
-as HW midi devices, run following as *root*:
+Hatari requires midi hardware devices to work, it doesn't support ALSA
+directly without PortMidi.  To get the software synth ALSA devices to
+appear as HW midi devices, run following as *root*:
   modprobe snd-virmidi
 
 When you list your ALSA output devices with:
@@ -128,6 +153,10 @@ VirMidi was Card 1 and as the port used above was first one, I give
 Hatari the following midi device:
   hatari --midi-out /dev/snd/midiC1D0
 
+And to connect that device to synthetizer, if you use Fluid Synth
+(or its Qsynth GUI), you can for example do:
+  aconnect "Virtual Raw MIDI 1-0" "FLUID Synth"
+
 (For the virtual midi keyboard, give same device with --midi-in option.)
 
 Note: In older (obsolete) Linux distros SDL_mixer may take exclusive
@@ -137,8 +166,8 @@ MIDI sound working. In recent distros this shouldn't anymore be
 a problem thanks to Pulseaudio.
 
 
-MIDI and networking
--------------------
+Forwarding MIDI over network
+----------------------------
 
 If you direct the MIDI data to stdout, you can use just ssh to
 forward the MIDI output over network:
@@ -207,7 +236,7 @@ Virtual MIDI Piano Keyboard (vmpk):
   http://vmpk.sourceforge.net/
 
 Patch (ALSA connecting) utilities:
-  http://alsa.opensrc.org/AlsaMidiPatchbays    
+  http://alsa.opensrc.org/AlsaMidiPatchbays
 
 FluidSynth:
   http://www.iiwu.org/fluidsynth/

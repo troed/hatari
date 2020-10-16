@@ -8,12 +8,14 @@
 #ifndef HATARI_CONFIGURATION_H
 #define HATARI_CONFIGURATION_H
 
+/* if header's struct contents depend on configuration options, header must include config.h */
+#include "config.h"
+
 /* Logging and tracing */
 typedef struct
 {
   char sLogFileName[FILENAME_MAX];
   char sTraceFileName[FILENAME_MAX];
-  int nExceptionDebugMask;
   int nTextLogLevel;
   int nAlertDlgLogLevel;
   bool bConfirmQuit;
@@ -26,10 +28,17 @@ typedef struct
 typedef struct
 {
   int nNumberBase;
-  int nDisasmLines;
+  int nSymbolLines;
   int nMemdumpLines;
+  int nDisasmLines;
+  int nBacktraceLines;
+  int nExceptionDebugMask;
   int nDisasmOptions;
   bool bDisasmUAE;
+  /* load and free symbols for GEMDOS HD loaded programs automatically */
+  bool bSymbolsAutoLoad;
+  /* whether to match all symbols or just types relevant for given command */
+  bool bMatchAllSymbols;
 } CNF_DEBUGGER;
 
 
@@ -40,6 +49,19 @@ typedef struct
   bool bPatchTos;
   char szCartridgeImageFileName[FILENAME_MAX];
 } CNF_ROM;
+
+
+/* LILO (Linux loader) configuration */
+typedef struct
+{
+  char szCommandLine[256];	/* bootinfo CL_SIZE */
+  char szKernelFileName[FILENAME_MAX];
+  char szKernelSymbols[FILENAME_MAX];
+  char szRamdiskFileName[FILENAME_MAX];
+  bool bRamdiskToFastRam;
+  bool bKernelToFastRam;
+  bool bHaltOnReboot;
+} CNF_LILO;
 
 
 /* Sound configuration */
@@ -60,8 +82,11 @@ typedef struct
 typedef struct
 {
   bool bEnableRS232;
+  bool bEnableSccB;
   char szOutFileName[FILENAME_MAX];
   char szInFileName[FILENAME_MAX];
+  char sSccBInFileName[FILENAME_MAX];
+  char sSccBOutFileName[FILENAME_MAX];
 } CNF_RS232;
 
 
@@ -84,6 +109,7 @@ typedef struct
 typedef enum {
   SHORTCUT_OPTIONS,
   SHORTCUT_FULLSCREEN,
+  SHORTCUT_BORDERS,
   SHORTCUT_MOUSEGRAB,
   SHORTCUT_COLDRESET,
   SHORTCUT_WARMRESET,
@@ -117,7 +143,8 @@ typedef struct
 
 typedef struct
 {
-  int nMemorySize;
+  int STRamSize_KB;
+  int TTRamSize_KB;
   bool bAutoSave;
   char szMemoryCaptureFileName[FILENAME_MAX];
   char szAutoSaveFileName[FILENAME_MAX];
@@ -142,7 +169,16 @@ typedef struct
   int nKeyCodeUp, nKeyCodeDown, nKeyCodeLeft, nKeyCodeRight, nKeyCodeFire;
 } JOYSTICK;
 
-#define JOYSTICK_COUNT 6
+enum
+{
+	JOYID_JOYSTICK0,
+	JOYID_JOYSTICK1,
+	JOYID_STEPADA,
+	JOYID_STEPADB,
+	JOYID_PARPORT1,
+	JOYID_PARPORT2,
+	JOYSTICK_COUNT
+};
 
 typedef struct
 {
@@ -190,26 +226,43 @@ typedef enum
 
 typedef struct
 {
-  int nHardDiskDrive;
+  int nGemdosDrive;
   bool bUseHardDiskDirectories;
-  bool bUseIdeMasterHardDiskImage;
-  bool bUseIdeSlaveHardDiskImage;
   WRITEPROTECTION nWriteProtection;
   GEMDOS_CHR_CONV nGemdosCase;
+  bool bFilenameConversion;
+  bool bGemdosHostTime;
   bool bBootFromHardDisk;
   char szHardDiskDirectories[MAX_HARDDRIVES][FILENAME_MAX];
-  char szIdeMasterHardDiskImage[FILENAME_MAX];
-  char szIdeSlaveHardDiskImage[FILENAME_MAX];
 } CNF_HARDDISK;
 
-/* SCSI/ACSI configuration */
+/* SCSI/ACSI/IDE configuration */
 #define MAX_ACSI_DEVS 8
+#define MAX_SCSI_DEVS 8
+#define MAX_IDE_DEVS 2
 
 typedef struct
 {
   bool bUseDevice;
   char sDeviceFile[FILENAME_MAX];
+  int nBlockSize;
 } CNF_SCSIDEV;
+
+typedef enum
+{
+  BYTESWAP_OFF,
+  BYTESWAP_ON,
+  BYTESWAP_AUTO
+} BYTESWAPPING;
+
+typedef struct
+{
+  bool bUseDevice;
+  BYTESWAPPING nByteSwap;
+  char sDeviceFile[FILENAME_MAX];
+  int nBlockSize;
+  int nDeviceType;
+} CNF_IDEDEV;
 
 /* Falcon register $FFFF8006 bits 6 & 7 (mirrored in $FFFF82C0 bits 0 & 1):
  * 00 Monochrome
@@ -234,24 +287,33 @@ typedef enum
 typedef struct
 {
   MONITORTYPE nMonitorType;
-  int nFrameSkips;
+  bool DisableVideo;
   bool bFullScreen;
-  bool bKeepResolution;
-  bool bKeepResolutionST;
   bool bAllowOverscan;
   bool bAspectCorrect;
+  bool bShowStatusbar;
+  bool bShowDriveLed;
+  bool bMouseWarp;
+  bool bCrop;
+  bool bForceMax;
   bool bUseExtVdiResolutions;
+  bool bKeepResolution;
+#if !WITH_SDL2
+  bool bKeepResolutionST;
+#else
+  bool bResizable;
+  bool bUseVsync;
+  bool bUseSdlRenderer;
+  float nZoomFactor;
+#endif
   int nSpec512Threshold;
   int nForceBpp;
   int nVdiColors;
   int nVdiWidth;
   int nVdiHeight;
-  bool bShowStatusbar;
-  bool bShowDriveLed;
-  bool bCrop;
-  bool bForceMax;
   int nMaxWidth;
   int nMaxHeight;
+  int nFrameSkips;
 } CNF_SCREEN;
 
 
@@ -269,6 +331,8 @@ typedef struct
   bool bEnableMidi;
   char sMidiInFileName[FILENAME_MAX];
   char sMidiOutFileName[FILENAME_MAX];
+  char sMidiInPortName[FILENAME_MAX];
+  char sMidiOutPortName[FILENAME_MAX];
 } CNF_MIDI;
 
 
@@ -276,10 +340,11 @@ typedef struct
 typedef enum
 {
   MACHINE_ST,
+  MACHINE_MEGA_ST,
   MACHINE_STE,
+  MACHINE_MEGA_STE,
   MACHINE_TT,
-  MACHINE_FALCON,
-  MACHINE_MEGA_STE
+  MACHINE_FALCON
 } MACHINETYPE;
 
 typedef enum
@@ -299,6 +364,15 @@ typedef enum
 } FPUTYPE;
 #endif
 
+typedef enum
+{
+  VIDEO_TIMING_MODE_RANDOM = 0,
+  VIDEO_TIMING_MODE_WS1,
+  VIDEO_TIMING_MODE_WS2,
+  VIDEO_TIMING_MODE_WS3,
+  VIDEO_TIMING_MODE_WS4,
+} VIDEOTIMINGMODE;
+
 typedef struct
 {
   int nCpuLevel;
@@ -307,16 +381,17 @@ typedef struct
   MACHINETYPE nMachineType;
   bool bBlitter;                  /* TRUE if Blitter is enabled */
   DSPTYPE nDSPType;               /* how to "emulate" DSP */
-  bool bRealTimeClock;
   bool bPatchTimerD;
   bool bFastBoot;                 /* Enable to patch TOS for fast boot */
   bool bFastForward;
+  bool bAddressSpace24;           /* Always set to true with old UAE cpu */
+  VIDEOTIMINGMODE VideoTimingMode;
 
 #if ENABLE_WINUAE_CPU
-  bool bAddressSpace24;
   bool bCycleExactCpu;
   FPUTYPE n_FPUType;
   bool bCompatibleFPU;            /* More compatible FPU */
+  bool bSoftFloatFPU;
   bool bMMU;                      /* TRUE if MMU is enabled */
 #endif
 } CNF_SYSTEM;
@@ -344,7 +419,10 @@ typedef struct
   CNF_DISKIMAGE DiskImage;
   CNF_HARDDISK HardDisk;
   CNF_SCSIDEV Acsi[MAX_ACSI_DEVS];
+  CNF_SCSIDEV Scsi[MAX_SCSI_DEVS];
+  CNF_IDEDEV Ide[MAX_IDE_DEVS];
   CNF_ROM Rom;
+  CNF_LILO Lilo;
   CNF_RS232 RS232;
   CNF_PRINTER Printer;
   CNF_MIDI Midi;
@@ -356,10 +434,38 @@ typedef struct
 extern CNF_PARAMS ConfigureParams;
 extern char sConfigFileName[FILENAME_MAX];
 
+static inline bool Config_IsMachineST(void)
+{
+	return ConfigureParams.System.nMachineType == MACHINE_ST ||
+	       ConfigureParams.System.nMachineType == MACHINE_MEGA_ST;
+}
+
+static inline bool Config_IsMachineSTE(void)
+{
+	return ConfigureParams.System.nMachineType == MACHINE_STE ||
+	       ConfigureParams.System.nMachineType == MACHINE_MEGA_STE;
+}
+
+static inline bool Config_IsMachineMegaSTE(void)
+{
+	return ConfigureParams.System.nMachineType == MACHINE_MEGA_STE;
+}
+
+static inline bool Config_IsMachineTT(void)
+{
+	return ConfigureParams.System.nMachineType == MACHINE_TT;
+}
+
+static inline bool Config_IsMachineFalcon(void)
+{
+	return ConfigureParams.System.nMachineType == MACHINE_FALCON;
+}
+
 extern void Configuration_SetDefault(void);
 extern void Configuration_Apply(bool bReset);
 extern void Configuration_Load(const char *psFileName);
 extern void Configuration_Save(void);
 extern void Configuration_MemorySnapShot_Capture(bool bSave);
+extern void Configuration_ChangeCpuFreq ( int CpuFreq_new );
 
 #endif

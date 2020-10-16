@@ -2,7 +2,7 @@
 #
 # script to cleanup 'nm' output for Hatari debugger.
 #
-# 2013 (C) Eero Tamminen, licenced under GPL v2+
+# 2013 (C) Eero Tamminen, licensed under GPL v2+
 
 usage ()
 {
@@ -10,7 +10,7 @@ usage ()
 	echo
 	echo "Usage: $name <nm output file>"
 	echo
-	echo "Clean up from 'nm' symbol adddress output"
+	echo "Clean up from 'nm' symbol address output"
 	echo "symbols that aren't useful with Hatari debugger"
 	echo "e.g. because those (non-interesting) symbols"
 	echo "are bound to multiple addresses:"

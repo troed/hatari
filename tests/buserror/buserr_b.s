@@ -7,8 +7,8 @@ endaddr         EQU $FFFFFF
 
                 movea.l 4(SP),A5
                 move.l  $0C(A5),D0
-                add.l   $14(SP),D0
-                add.l   $1C(SP),D0
+                add.l   $14(A5),D0
+                add.l   $1C(A5),D0
                 add.l   #$0800,D0
 
                 move.l  D0,D1
@@ -27,7 +27,7 @@ endaddr         EQU $FFFFFF
                 move.w  #$20,-(SP)
                 trap    #1              ; Super
                 addq.l  #6,SP
-                move.w  D0,old_ssp
+                move.l  D0,old_ssp
 
                 clr.w   -(SP)
                 pea     filename

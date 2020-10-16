@@ -10,8 +10,8 @@ INCFLAGS := -I$(EMU) \
 				-I$(LIBRETRO_COMM_DIR)/include \
 				-I$(LIBRETRO_COMM_DIR)/include/compat/zlib \
 				-I$(LIBRETRO_DIR)/include \
-				-I$(LIBUTILS) \
-				-I$(CPU_PREGEN)
+				-I$(LIBUTILS)
+#				-I$(CPU_PREGEN)
 
 SOURCES_C   :=
 SOURCES_CXX :=
@@ -35,14 +35,18 @@ SOURCES_C += \
 				 $(ZLIB_DIR)/zutil.c 
 endif
 
-SOURCES_C += $(CPU_PREGEN)/cpudefs.c \
-				 $(CPU_PREGEN)/cpuemu.c \
-				 $(CPU_PREGEN)/cpustbl.c \
+#SOURCES_C += $(CPU_PREGEN)/cpudefs.c \
+#				 $(CPU_PREGEN)/cpuemu.c \
+#				 $(CPU_PREGEN)/cpustbl.c \
+
+SOURCES_C += \
+				 $(CPU)/build68k.c \
+				 $(CPU)/fpp.c \
+				 $(CPU)/gencpu.c \
 				 $(CPU)/hatari-glue.c \
 				 $(CPU)/memory.c \
 				 $(CPU)/newcpu.c \
 				 $(CPU)/readcpu.c \
-				 $(CPU)/fpp.c \
 				 $(GUI)/dlgAbout.c \
 				 $(GUI)/dlgDevice.c \
 				 $(GUI)/dlgFileSelect.c \

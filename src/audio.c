@@ -6,7 +6,7 @@
 
   This file contains the routines which pass the audio data to the SDL library.
 */
-const char Audio_fileid[] = "Hatari audio.c : " __DATE__ " " __TIME__;
+const char Audio_fileid[] = "Hatari audio.c";
 
 #include <SDL.h>
 
@@ -24,7 +24,7 @@ const char Audio_fileid[] = "Hatari audio.c : " __DATE__ " " __TIME__;
 
 int nAudioFrequency = 44100;			/* Sound playback frequency */
 bool bSoundWorking = false;			/* Is sound OK */
-volatile bool bPlayingBuffer = false;		/* Is playing buffer? */
+static volatile bool bPlayingBuffer = false;	/* Is playing buffer? */
 int SoundBufferSize = 1024 / 4;			/* Size of sound buffer (in samples) */
 int CompleteSndBufIdx;				/* Replay-index into MixBuffer */
 int SdlAudioBufferSize = 0;			/* in ms (0 = use default) */
@@ -94,13 +94,10 @@ static void Audio_CallBack(void *userdata, Uint8 *stream, int len)
 			*pBuffer++ = MixBuffer[(CompleteSndBufIdx + i) % MIXBUFFER_SIZE][0];
 			*pBuffer++ = MixBuffer[(CompleteSndBufIdx + i) % MIXBUFFER_SIZE][1];
 		}
-		/* If the buffer is filled more than 50%, mirror sample buffer to fake the
-		 * missing samples */
-		if (nGeneratedSamples >= len/2)
-		{
-			int remaining = len - nGeneratedSamples;
-			memcpy(pBuffer, stream+(nGeneratedSamples-remaining)*4, remaining*4);
-		}
+		/* Clear rest of the buffer to ensure we don't play random bytes instead */
+		/* of missing samples */
+		memset(pBuffer, 0, (len - nGeneratedSamples) * 4);
+
 		CompleteSndBufIdx += nGeneratedSamples;
 		nGeneratedSamples = 0;
 		
@@ -117,7 +114,6 @@ static void Audio_CallBack(void *userdata, Uint8 *stream, int len)
  */
 void Audio_Init(void)
 {
-#ifndef __LIBRETRO__
 	SDL_AudioSpec desiredAudioSpec;    /* We fill in the desired SDL audio options here */
 
 	/* Is enabled? */
@@ -134,7 +130,7 @@ void Audio_Init(void)
 	{
 		if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0)
 		{
-			fprintf(stderr, "Could not init audio: %s\n", SDL_GetError() );
+			Log_Printf(LOG_WARN, "Could not init audio: %s\n", SDL_GetError() );
 			bSoundWorking = false;
 			return;
 		}
@@ -160,29 +156,33 @@ void Audio_Init(void)
 		int samples = (desiredAudioSpec.freq / 1000) * SdlAudioBufferSize;
 		int power2 = 1;
 		while ( power2 < samples )		/* compute the power of 2 just above samples */
-                        power2 *= 2;
+			power2 *= 2;
 
-//fprintf ( stderr , "samples %d power %d\n" , samples , power2 );
 		desiredAudioSpec.samples = power2;	/* number of samples corresponding to the requested SdlAudioBufferSize */
 	}
 
 
 	if (SDL_OpenAudio(&desiredAudioSpec, NULL))	/* Open audio device */
 	{
-		fprintf(stderr, "Can't use audio: %s\n", SDL_GetError());
+		Log_Printf(LOG_WARN, "Can't use audio: %s\n", SDL_GetError());
 		bSoundWorking = false;
 		ConfigureParams.Sound.bEnableSound = false;
 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
 		return;
 	}
 
+#if WITH_SDL2						/* SDL2 does not set desiredAudioSpec.size anymore */
+	SoundBufferSize = desiredAudioSpec.samples;
+#else
 	SoundBufferSize = desiredAudioSpec.size;	/* May be different than the requested one! */
 	SoundBufferSize /= 4;				/* bytes -> samples (16 bit signed stereo -> 4 bytes per sample) */
+#endif
 	if (SoundBufferSize > MIXBUFFER_SIZE/2)
 	{
-		fprintf(stderr, "Warning: Soundbuffer size is too big!\n");
+		Log_Printf(LOG_WARN, "Soundbuffer size is too big (%d > %d)!\n",
+			   SoundBufferSize, MIXBUFFER_SIZE/2);
 	}
-#endif
+
 	/* All OK */
 	bSoundWorking = true;
 	/* And begin */
@@ -227,10 +227,6 @@ void Audio_Unlock(void)
 	SDL_UnlockAudio();
 }
 
-#ifdef __LIBRETRO__
-extern int CHANGE_RATE;
-extern float SAMPLERATE;
-#endif
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -244,23 +240,14 @@ void Audio_SetOutputAudioFreq(int nNewFrequency)
 		/* Set new frequency */
 		nAudioFrequency = nNewFrequency;
 
-#ifdef __LIBRETRO__
-		float tmp=(float)nAudioFrequency;
-		if(tmp!=SAMPLERATE)
-		{
-			SAMPLERATE=(float)nAudioFrequency;
-			CHANGE_RATE=1;
-		}
-#endif
-
-		if (ConfigureParams.System.nMachineType == MACHINE_FALCON)
+		if (Config_IsMachineFalcon())
 		{
 			/* Compute Ratio between host computer sound frequency and Hatari's sound frequency. */
 			Crossbar_Compute_Ratio();
 		}
-		else if (ConfigureParams.System.nMachineType != MACHINE_ST)
+		else if (!Config_IsMachineST())
 		{
-			/* Adapt LMC filters to this new frequency */			
+			/* Adapt LMC filters to this new frequency */
 			DmaSnd_Init_Bass_and_Treble_Tables();
 		}
 
@@ -272,15 +259,13 @@ void Audio_SetOutputAudioFreq(int nNewFrequency)
 		}
 	}
 
-	if ((ConfigureParams.System.nMachineType == MACHINE_ST) &&
-		(nAudioFrequency == 44100 || nAudioFrequency == 48000))
+	/* Apply YM2149 C10 low pass filter ? (except if forced to NONE) */
+	if ( YM2149_LPF_Filter != YM2149_LPF_FILTER_NONE )
 	{
-		/* Apply YM2149 C10 filter. */
-		UseLowPassFilter = true;
-	}
-	else
-	{
-		UseLowPassFilter = false;
+		if ( Config_IsMachineST() && nAudioFrequency >= 40000 )
+			YM2149_LPF_Filter = YM2149_LPF_FILTER_LPF_STF;
+		else
+			YM2149_LPF_Filter = YM2149_LPF_FILTER_PWM;
 	}
 }
 

@@ -92,7 +92,7 @@ int Dialog_MainDlg(bool *bReset, bool *bLoadedSnapshot)
 
 	do
 	{
-		retbut = SDLGui_DoDialog(maindlg, NULL);
+		retbut = SDLGui_DoDialog(maindlg, NULL, false);
 		switch (retbut)
 		{
 		 case MAINDLG_ABOUT:
@@ -122,7 +122,7 @@ int Dialog_MainDlg(bool *bReset, bool *bLoadedSnapshot)
 				/* Memory snapshot has been loaded - leave GUI immediately */
 				*bLoadedSnapshot = true;
 				SDL_ShowCursor(bOldMouseVisibility);
-				Main_WarpMouse(nOldMouseX, nOldMouseY);
+				Main_WarpMouse(nOldMouseX, nOldMouseY, true);
 				return true;
 			}
 			break;
@@ -171,7 +171,7 @@ int Dialog_MainDlg(bool *bReset, bool *bLoadedSnapshot)
 		*bReset = true;
 
 	SDL_ShowCursor(bOldMouseVisibility);
-	Main_WarpMouse(nOldMouseX, nOldMouseY);
+	Main_WarpMouse(nOldMouseX, nOldMouseY, true);
 
 	return (retbut == MAINDLG_OK);
 }

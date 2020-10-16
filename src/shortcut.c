@@ -6,7 +6,7 @@
 
   Shortcut keys
 */
-const char ShortCut_fileid[] = "Hatari shortcut.c : " __DATE__ " " __TIME__;
+const char ShortCut_fileid[] = "Hatari shortcut.c";
 
 #include <SDL.h>
 
@@ -17,7 +17,6 @@ const char ShortCut_fileid[] = "Hatari shortcut.c : " __DATE__ " " __TIME__;
 #include "floppy.h"
 #include "joy.h"
 #include "keymap.h"
-#include "m68000.h"
 #include "memorySnapShot.h"
 #include "reset.h"
 #include "screen.h"
@@ -30,6 +29,7 @@ const char ShortCut_fileid[] = "Hatari shortcut.c : " __DATE__ " " __TIME__;
 #include "video.h"
 #include "avi_record.h"
 #include "clocks_timings.h"
+#include "statusbar.h"
 
 static SHORTCUTKEYIDX ShortCutKey = SHORTCUT_NONE;  /* current shortcut key */
 
@@ -40,6 +40,20 @@ static SHORTCUTKEYIDX ShortCutKey = SHORTCUT_NONE;  /* current shortcut key */
  */
 static void ShortCut_FullScreen(void)
 {
+	static Uint32 last_ticks = 0;
+	Uint32 cur_ticks;
+
+	/* SDL2 sometimes reports multiple key up and down events when toggling
+	 * fullscreen mode, even though the key has not been released in between
+	 * (likely because the SDL window focus is lost when switching mode).
+	 * To avoid that we're going back and forth between fullscreen mode and
+	 * windowed mode in this case, we have to ignore full screen shortcut
+	 * events that happen too often. */
+	cur_ticks = SDL_GetTicks();
+	if (cur_ticks - last_ticks < 200)
+		return;
+	last_ticks = cur_ticks;
+
 	if (!bInFullScreen)
 	{
 		Screen_EnterFullScreen();
@@ -50,6 +64,15 @@ static void ShortCut_FullScreen(void)
 	}
 }
 
+/*-----------------------------------------------------------------------*/
+/**
+ * Shortcut to toggle borders
+ */
+static void ShortCut_Borders(void)
+{
+	ConfigureParams.Screen.bAllowOverscan = !ConfigureParams.Screen.bAllowOverscan;
+	Screen_ModeChanged(false);  /* false: re-create window only if size changed */
+}
 
 /*-----------------------------------------------------------------------*/
 /**
@@ -228,14 +251,12 @@ static void ShortCut_InsertDisk(int drive)
 	char *selname, *zip_path = NULL;
 	const char *tmpname;
 	char FileNameB[ FILENAME_MAX ];
-	char ZipPathB[ FILENAME_MAX ];
 
 	if (SDLGui_SetScreen(sdlscrn))
 		return;
 
 	/* Save current names for drive 1 before checking autoinsert */
 	strcpy ( FileNameB , ConfigureParams.DiskImage.szDiskFileName[ 1 ] );
-	strcpy ( ZipPathB , ConfigureParams.DiskImage.szDiskZipPath[ 1 ] );
 
 	if (ConfigureParams.DiskImage.szDiskFileName[drive][0])
 		tmpname = ConfigureParams.DiskImage.szDiskFileName[drive];
@@ -251,8 +272,7 @@ static void ShortCut_InsertDisk(int drive)
 		else
 			Floppy_SetDiskFileNameNone(drive);
 
-		if (zip_path)
-			free(zip_path);
+		free(zip_path);
 		free(selname);
 		
 		Floppy_InsertDiskIntoDrive(0);
@@ -279,48 +299,53 @@ void ShortCut_ActKey(void)
 	switch (ShortCutKey)
 	{
 	 case SHORTCUT_OPTIONS:
-		Dialog_DoProperty();           /* Show options dialog */
+		Dialog_DoProperty();		/* Show options dialog */
 		break;
 	 case SHORTCUT_FULLSCREEN:
-		ShortCut_FullScreen();         /* Switch between fullscreen/windowed mode */
+		ShortCut_FullScreen();		/* Switch between fullscreen/windowed mode */
+		break;
+	 case SHORTCUT_BORDERS:
+		ShortCut_Borders();		/* Toggle Atari borders */
 		break;
 	 case SHORTCUT_MOUSEGRAB:
-		ShortCut_MouseGrab();          /* Toggle mouse grab */
+		ShortCut_MouseGrab();		/* Toggle mouse grab */
 		break;
 	 case SHORTCUT_COLDRESET:
 		Main_UnPauseEmulation();
-		Reset_Cold();                  /* Reset emulator with 'cold' (clear all) */
+		Reset_Cold();			/* Reset emulator with 'cold' (clear all) */
+		Statusbar_UpdateInfo();		/* Some infos can change after 'reset' */
 		break;
 	 case SHORTCUT_WARMRESET:
 		Main_UnPauseEmulation();
-		Reset_Warm();                  /* Emulator 'warm' reset */
+		Reset_Warm();			/* Emulator 'warm' reset */
+		Statusbar_UpdateInfo();		/* Some infos can change after 'reset' */
 		break;
 	 case SHORTCUT_SCREENSHOT:
-		ScreenSnapShot_SaveScreen();   /* Grab screenshot */
+		ScreenSnapShot_SaveScreen();	/* Grab screenshot */
 		break;
 	 case SHORTCUT_BOSSKEY:
-		ShortCut_BossKey();            /* Boss key */
+		ShortCut_BossKey();		/* Boss key */
 		break;
-	 case SHORTCUT_CURSOREMU:          /* Toggle joystick emu on/off */
+	 case SHORTCUT_CURSOREMU:		/* Toggle joystick emu on/off */
 		Joy_ToggleCursorEmulation();
 		break;
 	 case SHORTCUT_FASTFORWARD:
-		ShortCut_FastForward();       /* Toggle Min/Max speed */
+		ShortCut_FastForward();		/* Toggle Min/Max speed */
 		break;
 	 case SHORTCUT_RECANIM:
-		ShortCut_RecordAnimation();    /* Record animation */
+		ShortCut_RecordAnimation();	/* Record animation */
 		break;
 	 case SHORTCUT_RECSOUND:
-		ShortCut_RecordSound();        /* Toggle sound recording */
+		ShortCut_RecordSound();		/* Toggle sound recording */
 		break;
 	 case SHORTCUT_SOUND:
-		ShortCut_SoundOnOff();         /* Enable/disable sound */
+		ShortCut_SoundOnOff();		/* Enable/disable sound */
 		break;
 	 case SHORTCUT_DEBUG:
-		ShortCut_Debug();              /* Invoke the Debug UI */
+		ShortCut_Debug();		/* Invoke the Debug UI */
 		break;
 	 case SHORTCUT_PAUSE:
-		ShortCut_Pause();              /* Invoke Pause */
+		ShortCut_Pause();		/* Invoke Pause */
 		break;
 	 case SHORTCUT_JOY_0:
 		Joy_SwitchMode(0);
@@ -382,7 +407,7 @@ bool Shortcut_Invoke(const char *shortcut)
 
 	if (ShortCutKey != SHORTCUT_NONE)
 	{
-		fprintf(stderr, "Shortcut invocation failed, shortcut already active\n");
+		fprintf(stderr, "WARNING: Shortcut invocation failed, shortcut already active\n");
 		return false;
 	}
 	for (i = 0; shortcuts[i].name; i++)
@@ -425,11 +450,14 @@ static SHORTCUTKEYIDX ShortCut_CheckKey(int symkey, int *keys)
 /**
  * Check which Shortcut key is pressed/released.
  * If press is set, store the key array index.
- * Return zero if key didn't match to a shortcut
+ * Return true if key combo matched to a shortcut
  */
-int ShortCut_CheckKeys(int modkey, int symkey, bool press)
+bool ShortCut_CheckKeys(int modkey, int symkey, bool press)
 {
 	SHORTCUTKEYIDX key;
+
+	if (symkey == SDLK_UNKNOWN)
+		return false;
 
 	if (modkey & (KMOD_RALT|KMOD_LMETA|KMOD_RMETA|KMOD_MODE))
 		key = ShortCut_CheckKey(symkey, ConfigureParams.Shortcut.withModifier);
@@ -437,8 +465,8 @@ int ShortCut_CheckKeys(int modkey, int symkey, bool press)
 		key = ShortCut_CheckKey(symkey, ConfigureParams.Shortcut.withoutModifier);
 
 	if (key == SHORTCUT_NONE)
-		return 0;
+		return false;
 	if (press)
 		ShortCutKey = key;
-	return 1;
+	return true;
 }

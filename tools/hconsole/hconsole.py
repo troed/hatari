@@ -101,6 +101,14 @@ class Hatari:
     hataribin = "hatari"
 
     def __init__(self, args):
+        # member defaults
+        self.pid = 0
+        self.interval = 0.2
+        self.shiftdown = False
+        self.verbose = False
+        self.control = None
+        self.paused = False
+        self.winuae = False
         # collect hatari process zombies without waitpid()
         signal.signal(signal.SIGCHLD, signal.SIG_IGN)
         self._assert_hatari_compatibility()
@@ -109,21 +117,19 @@ class Hatari:
             os.unlink(self.controlpath)
         self.server.bind(self.controlpath)
         self.server.listen(1)
-        self.control = None
-        self.paused = False
-        self.interval = 0.2
-        self.pid = 0
         if not self.run_hatari(args):
             print("ERROR: failed to run Hatari")
             sys.exit(1)
-        self.shiftdown = False
-        self.verbose = False
 
     def _assert_hatari_compatibility(self):
         "check Hatari compatibility and return error string if it's not"
+        print("Using following Hatari binary:")
+        os.system("which %s" % self.hataribin)
         error = True
         pipe = os.popen(self.hataribin + " -h")
         for line in pipe.readlines():
+            if line.find("--addr24") >= 0:
+                self.winuae = True
             if line.find("--control-socket") >= 0:
                 error = False
                 break
@@ -134,7 +140,7 @@ class Hatari:
         if error:
             print("ERROR: %s" % error)
             sys.exit(-1)
-        
+
     def is_running(self):
         if not self.pid:
             return False
@@ -148,7 +154,7 @@ class Hatari:
                 self.control = None
             return False
         return True
-    
+
     def run_hatari(self, args):
         if self.control:
             print("ERROR: Hatari is already running, stop it first")
@@ -167,7 +173,7 @@ class Hatari:
         else:
             # child runs Hatari
             allargs = [self.hataribin, "--control-socket", self.controlpath] + args
-            print("RUN:", allargs)
+            print('RUN: "%s"' % ' '.join(allargs))
             os.execvp(self.hataribin, allargs)
 
     def send_message(self, msg, fast = False):
@@ -185,19 +191,19 @@ class Hatari:
         else:
             print("ERROR: no Hatari (control socket)")
             return False
-        
+
     def change_option(self, option):
         return self.send_message("hatari-option %s" % option)
 
     def trigger_shortcut(self, shortcut):
         return self.send_message("hatari-shortcut %s" % shortcut)
-    
+
     def _shift_up(self):
         if self.shiftdown:
             self.shiftdown = False
             return self.send_message("hatari-event keyup %s" % Scancode.LeftShift, True)
         return True
-    
+
     def _unshifted_keypress(self, key):
         self._shift_up()
         if key == ' ':
@@ -233,10 +239,10 @@ class Hatari:
 
     def debug_command(self, cmd):
         return self.send_message("hatari-debug %s" % cmd)
-    
+
     def change_path(self, path):
         return self.send_message("hatari-path %s" % path)
-    
+
     def toggle_device(self, device):
         return self.send_message("hatari-toggle %s" % device)
 
@@ -265,14 +271,14 @@ class Hatari:
 class CommandInput:
     prompt = "hatari-command: "
     historysize = 99
-    
+
     def __init__(self, commands):
         readline.set_history_length(self.historysize)
         readline.parse_and_bind("tab: complete")
         readline.set_completer_delims(" \t\r\n")
         readline.set_completer(self.complete)
         self.commands = commands
-    
+
     def complete(self, text, state):
         idx = 0
         #print "text: '%s', state '%d'" % (text, state)
@@ -281,7 +287,7 @@ class CommandInput:
                 idx += 1
                 if idx > state:
                     return cmd
-    
+
     def loop(self):
         try:
             rawline = input(self.prompt)
@@ -338,6 +344,8 @@ class Tokens:
     "--midi-out",
     "--rs232-in",
     "--rs232-out",
+#    "--scc-b-in",
+    "--scc-b-out",
     "--disk-a",
     "--disk-b",
     "--fastfdc",
@@ -409,7 +417,9 @@ class Tokens:
     "printout",
     "soundout",
     "rs232in",
-    "rs232out"
+    "rs232out",
+#    "sccbin",
+    "sccbout"
     ]
     # use the long variants of the commands for clarity
     debugger_tokens = [
@@ -588,7 +598,7 @@ class Main:
         exit = False
         if "--" not in args:
             return (args[1:], file, exit)
-        
+
         for arg in args:
             if arg == "--":
                 return (args[args.index("--")+1:], file, exit)

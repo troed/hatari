@@ -6,17 +6,21 @@
 
   This code processes commands from the Hatari control socket
 */
-const char Control_fileid[] = "Hatari control.c : " __DATE__ " " __TIME__;
+const char Control_fileid[] = "Hatari control.c";
 
 #include "config.h"
 
 #if HAVE_UNIX_DOMAIN_SOCKETS
 # include <sys/socket.h>
+# include <sys/stat.h>	/* mkfifo() */
 # include <sys/un.h>
+# include <fcntl.h>
 #endif
 
 #include <sys/types.h>
+#if HAVE_SYS_TIME_H
 #include <sys/time.h>
+#endif
 #include <unistd.h>
 #include <ctype.h>
 #include <assert.h>
@@ -33,6 +37,7 @@ const char Control_fileid[] = "Hatari control.c : " __DATE__ " " __TIME__;
 #include "midi.h"
 #include "printer.h"
 #include "rs232.h"
+#include "scc.h"
 #include "shortcut.h"
 #include "str.h"
 #include "screen.h"
@@ -174,6 +179,7 @@ static bool Control_DeviceAction(const char *name, action_t action)
 	} item[] = {
 		{ "printer", &ConfigureParams.Printer.bEnablePrinting, Printer_Init, Printer_UnInit },
 		{ "rs232",   &ConfigureParams.RS232.bEnableRS232, RS232_Init, RS232_UnInit },
+		{ "sccb",    &ConfigureParams.RS232.bEnableSccB, SCC_Init, SCC_UnInit },
 		{ "midi",    &ConfigureParams.Midi.bEnableMidi, Midi_Init, Midi_UnInit },
 		{ NULL, NULL, NULL, NULL }
 	};
@@ -233,6 +239,8 @@ static bool Control_SetPath(char *name)
 		{ "soundout", ConfigureParams.Sound.szYMCaptureFileName },
 		{ "rs232in",  ConfigureParams.RS232.szInFileName },
 		{ "rs232out", ConfigureParams.RS232.szOutFileName },
+//		{ "sccbin",   ConfigureParams.RS232.sSccBInFileName },
+		{ "sccbout",  ConfigureParams.RS232.sSccBOutFileName },
 		{ NULL, NULL }
 	};
 	int i;
@@ -364,7 +372,13 @@ void Control_ProcessBuffer(const char *orig)
 
 #if HAVE_UNIX_DOMAIN_SOCKETS
 
-/* socket from which control command line options are read */
+/* one-way fifo which Hatari creates and reads commands from */
+static char *FifoPath;
+static int ControlFifo;
+
+/* two-way socket to which Hatari connects, reads control commands
+ * from, and where the command responses (if any) are written to
+ */
 static int ControlSocket;
 
 /* pre-declared local functions */
@@ -386,6 +400,22 @@ bool Control_CheckUpdates(void)
 	fd_set readfds;
 	ssize_t bytes;
 	int status, sock;
+
+	if (ControlFifo) {
+		/* assume whole command can be read in one go */
+		bytes = read(ControlFifo, buffer, sizeof(buffer)-1);
+		if (bytes < 0) {
+			perror("command FIFO read error");
+			return false;
+		}
+		if (bytes == 0) {
+			/* non-blocking read, nothing to read */
+			return false;
+		}
+		buffer[bytes] = '\0';
+		Control_ProcessBuffer(buffer);
+		return false;
+	}
 
 	/* socket of file? */
 	if (ControlSocket) {
@@ -429,13 +459,13 @@ bool Control_CheckUpdates(void)
 		
 		/* assume whole command can be read in one go */
 		bytes = read(sock, buffer, sizeof(buffer)-1);
-		if (bytes < 0)
-		{
-			perror("Control socket read");
+		if (bytes < 0) {
+			perror("Control socket read error");
 			return false;
 		}
 		if (bytes == 0) {
 			/* closed */
+			fprintf(stderr, "ready control socket with 0 bytes available -> close socket\n");
 			close(ControlSocket);
 			ControlSocket = 0;
 			return false;
@@ -451,6 +481,60 @@ bool Control_CheckUpdates(void)
 
 /*-----------------------------------------------------------------------*/
 /**
+ * Close and remove FIFO file
+ */
+void Control_RemoveFifo(void)
+{
+	if (ControlFifo) {
+		close(ControlFifo);
+		ControlFifo = 0;
+	}
+	if (FifoPath) {
+		Log_Printf(LOG_DEBUG, "removing command FIFO: %s\n", FifoPath);
+		if (remove(FifoPath) < 0)
+		{
+			perror("Remove FIFO failed");
+		}
+		free(FifoPath);
+		FifoPath = NULL;
+	}
+}
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Open given command FIFO
+ * Return NULL for success, otherwise an error string
+ */
+const char *Control_SetFifo(const char *path)
+{
+	int fifo;
+
+	if (ControlSocket) {
+		return "Can't use a FIFO at the same time with a control socket";
+	}
+
+	Control_RemoveFifo();
+	Log_Printf(LOG_DEBUG, "creating command FIFO: %s\n", path);
+
+	if (mkfifo(path, S_IRUSR | S_IWUSR)) {
+		perror("FIFO creation error");
+		return "Can't create FIFO file";
+	}
+	FifoPath = strdup(path);
+
+	fifo = open(path, O_RDONLY | O_NONBLOCK);
+	if (fifo < 0) {
+		perror("FIFO open error");
+		Control_RemoveFifo();
+		return "opening non-blocking read-only FIFO failed";
+	}
+	ControlFifo = fifo;
+	return NULL;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
  * Open given control socket.
  * Return NULL for success, otherwise an error string
  */
@@ -458,11 +542,14 @@ const char *Control_SetSocket(const char *socketpath)
 {
 	struct sockaddr_un address;
 	int newsock;
+
+	if (ControlFifo) {
+		return "Can't use a FIFO at the same time with a control socket";
+	}
 	
 	newsock = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (newsock < 0)
-	{
-		perror("socket creation");
+	if (newsock < 0) {
+		perror("socket creation error");
 		return "Can't create AF_UNIX socket";
 	}
 
@@ -470,9 +557,8 @@ const char *Control_SetSocket(const char *socketpath)
 	strncpy(address.sun_path, socketpath, sizeof(address.sun_path));
 	address.sun_path[sizeof(address.sun_path)-1] = '\0';
 	Log_Printf(LOG_INFO, "Connecting to control socket '%s'...\n", address.sun_path);
-	if (connect(newsock, (struct sockaddr *)&address, sizeof(address)) < 0)
-	{
-		perror("socket connect");
+	if (connect(newsock, (struct sockaddr *)&address, sizeof(address)) < 0) {
+		perror("socket connect error");
 		close(newsock);
 		return "connection to control socket failed";
 	}
@@ -526,8 +612,10 @@ void Control_ReparentWindow(int width, int height, bool noembed)
 	Window parent_win, sdl_win;
 	const char *parent_win_id;
 	SDL_SysWMinfo info;
-#if !WITH_SDL2
 	Window wm_win;
+#if WITH_SDL2
+	Window dw1, *dw2;
+	unsigned int nwin;
 #endif
 
 	parent_win_id = getenv("PARENT_WIN_ID");
@@ -545,41 +633,43 @@ void Control_ReparentWindow(int width, int height, bool noembed)
 		Log_Printf(LOG_WARN, "Failed to get SDL_GetWMInfo()\n");
 		return;
 	}
+
 	display = info.info.x11.display;
 	sdl_win = info.info.x11.window;
 #if !WITH_SDL2
 	wm_win = info.info.x11.wmwindow;
 	info.info.x11.lock_func();
+#else
+	XQueryTree(display, sdl_win, &dw1, &wm_win, &dw2, &nwin);
 #endif
 	if (noembed)
 	{
-#if !WITH_SDL2
 		/* show WM window again */
 		XMapWindow(display, wm_win);
-#endif
 	}
 	else
 	{
 		char buffer[12];  /* 32-bits in hex (+ '\r') + '\n' + '\0' */
 
-#if !WITH_SDL2
 		/* hide WM window for Hatari */
 		XUnmapWindow(display, wm_win);
-#endif
+
 		/* reparent main Hatari window to given parent */
 		XReparentWindow(display, sdl_win, parent_win, 0, 0);
 
 		/* whether to send new window size */
 		if (bSendEmbedInfo && ControlSocket)
 		{
-			fprintf(stderr, "New %dx%d SDL window with ID: %lx\n",
+			Log_Printf(LOG_INFO, "New %dx%d SDL window with ID: %lx\n",
 				width, height, sdl_win);
 			sprintf(buffer, "%dx%d", width, height);
 			if (write(ControlSocket, buffer, strlen(buffer)) < 0)
-				perror("Control_ReparentWindow write");
+				perror("Control_ReparentWindow write error");
 		}
 	}
-#if !WITH_SDL2
+#if WITH_SDL2
+	XSync(display, false);
+#else
 	info.info.x11.unlock_func();
 #endif
 }

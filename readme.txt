@@ -2,9 +2,9 @@
 
                                     Hatari
 
-                             Version 1.8, July 2014
+                             Version 2.2.1, February 2019
 
-                          http://hatari.tuxfamily.org/
+                            http://hatari.tuxfamily.org/
 
 
 Contents:
@@ -17,7 +17,9 @@ Contents:
    3.3 Notes for Linux distribution packagers
        3.3.1 Known distro problems
 4. Running Hatari
-5. Contact
+5. Hatari tools and their run-time dependencies
+6. Hatari source subdirectory contents
+7. Contact
 
 
  1) License
@@ -57,13 +59,11 @@ for Hatari and the licenses of the other code concerned.
  2) What is Hatari?
  ------------------
 
-Hatari is an Atari ST/STE/TT/Falcon emulator for Linux, FreeBSD, NetBSD,
-BeOS, Mac-OSX and other Systems which are supported by the SDL library.
-Unlike most other open source ST emulators which try to give you a good
-environment for running GEM applications, Hatari tries to emulate the hardware
-as close as possible so that it is able to run most of the old Atari games
-and demos.  Because of this, it may be somewhat slower than less accurate
-emulators.
+Hatari is an Atari ST/STE/TT/Falcon emulator for Linux, FreeBSD, NetBSD, macOS,
+Windows and other Systems which are supported by the SDL library. Unlike most
+other open source ST emulators which try to give you a good environment for
+running GEM applications, Hatari tries to emulate the hardware as close as
+possible so that it is able to run most of the old Atari games and demos.
 
 
  3) Compiling and installing
@@ -80,19 +80,23 @@ Optional:
   AVI video recording file sizes (http://www.libpng.org/)
 - The GNU Readline library for Hatari debugger command line editing
 - The Xlib library to support Hatari Python UI window embedding on
-  systems with the X window system (Linux and other unixes) 
+  systems with the X window system (Linux and other unixes)
+- The PortMidi library required for MIDI support on macOS and Windows
+  (http://portmedia.sourceforge.net/)
 - The portaudio library for Falcon microphone handling
+- The udev library for NatFeats SCSI driver media change detection
 - The IPF support library (http://www.softpres.org/download)
 
 Don't forget to also install the header files of these libraries for compiling
 Hatari (some Linux distributions use separate development packages for these
 header files)!
 
-For compiling Hatari, you need a C compiler (preferably GNU C), and a working
-CMake (v2.8 or newer) installation, see http://www.cmake.org/ for details.
+For compiling Hatari, you need a C compiler that supports the C99 standard
+(preferably GNU C or Clang), and a working CMake (v2.8 or newer) installation,
+see http://www.cmake.org/ for details.
 
 CMake can generate makefiles for various flavours of "Make" (like GNU-Make)
-and various IDEs like Xcode on Mac OS X. To run CMake, you've got to pass the
+and various IDEs like Xcode on macOS. To run CMake, you've got to pass the
 path to the sources of Hatari as parameter, for example run the following if
 you are in the topmost directory of the Hatari source tree:
 	cmake .
@@ -120,58 +124,37 @@ build tree. You can then install the emulator by typing "make install".
 
  3.1) WinUAE and "old" UAE CPU cores
 
-By default Hatari is built with the "old" UAE CPU core used in the
-earlier Hatari releases, but versions starting from v1.5 support also
-new & experimental WinUAE CPU core which offers more cycle accurate
-030 & DSP emulation and from v1.6 onwards also working 030 MMU
-emulation.
+Up to version 1.9, Hatari had 2 different CPU cores : the "old" UAE CPU core
+used for STF/STE and the WinUAE CPU core for better TT/Falcon emulation.
+Default was to use the old UAE CPU core.
 
-The WinUAE CPU core can be enabled by toggling the ENABLE_WINUAE_CPU
-variable in the Hatari CMake configuration (e.g. with the interactive
-"ccmake" program).  Alternatively, you can run "./configure
---enable-winuae-cpu", which will run cmake with the correct
-parameters.
+Starting with Hatari 2.0, all the STF/STE specific code from the old CPU core
+was integrated into the new WinUAE CPU core. Some improvements were
+also added to the new CPU Core, greatly improving cycle accuracy and low
+level 680xx emulation.
 
-The plan is to eventually have WinUAE CPU core enabled by default and
-deprecate the "old" UAE CPU core, but currently WinUAE CPU core:
-- is lacking all the ST/STE specific tweaks and proper testing
-  for ST/STE compatibility
-- despite better emulation, it still doesn't run all the Falcon
-  programs that run with the "old" core although it works better
-  for most of them
-- doesn't have full debugger support
+Therefore, the new CPU core is now the default for all emulated machines.
 
-It's recommended to use Hatari built with the "old" (default) UAE CPU
-core for ST/STE emulation and the new WinUAE core for Falcon emulation.
-And test also the old core if Falcon programs don't work with the new
-one...
+Old CPU core can still be used by running "./configure --enable-old-uae-cpu"
+which may be useful on weakest machines too slow to run the new CPU core
+at acceptable speed.  Support for old CPU core will be removed soon though
+as it's not anymore properly tested.
 
 
  3.2) IPF support using capsimage library
 
-Hatari can use the optionnal capsimage library to access IPF and CTR
+Hatari can use the optional capsimage library to access IPF and CTR
 files. Those files are created using the Kryoflux board and allow to
 record MFM exact copies of original games, including the protection.
 
-Version 4.2 of the library allows to access IPF files, while the more recent
-version 5.1 fixes some bugs, as well as adding support for CTR files.
-
-Since version 5.1 is not yet available for all OSes in binary form, Hatari
-still default to version 4.2 (but you can compile capsimage 5.1 sources
-to build your library). You can change this by modifying "SET(CAPSIMAGE_VERSION 4)"
-into cmake/FindCapsImage.cmake
+Hatari supports version 5.1 of the library (previous support for older
+version 4.2 was removed as it is not used anymore)
 
 Refer to http://softpres.org/download and get the corresponding file
 from the "User Distribution" section that matches your OS.
 
-For version 4.2, you should have the following files in your include path :
-/usr/local/include/caps/
-	capsimage.h
-	fdc.h
-	form.h
-
 For version 5.1, you should have the following files in your include path :
-/usr/local/include/caps5/
+/usr/local/include/caps/
 	CapsAPI.h
 	CapsFDC.h
 	CapsForm.h
@@ -182,7 +165,7 @@ For version 5.1, you should have the following files in your include path :
 	CommonTypes.h
 
 You should also copy the libcapsimage.so* files in your library path,
-for example in /usr/local/lib/caps/ or /usr/local/lib/caps5/
+for example in /usr/local/lib/caps/
 
 
  3.3) Notes for Linux distribution packagers
@@ -190,8 +173,8 @@ for example in /usr/local/lib/caps/ or /usr/local/lib/caps5/
 TOS tester in tests/tosboot/ directory can be used to verify that
 Hatari was built fine enough that it's able to boot all tested TOS
 versions in various different HW configurations and run some GEMDOS
-based tests.  For EmuTOS, use version v0.8.7 or newer, older versions
-are buggy and fail the GEMDOS tests.
+based tests.  For EmuTOS, use the latest released 512k version to
+get best test coverage.
 
 If Hatari package will have two application menu entries for Hatari,
 one for the Python UI embedding Hatari, and another one for the plain
@@ -208,6 +191,20 @@ But registering handlers for mime-types seems desktop specific.
 
 
  3.3.1) Known distro problems
+
+If Hatari is built with portaudio support, *and* either portaudio or
+ALSA is configured to use pulseaudio plugin, that plugin aborts Hatari
+at Falcon emulation startup, if Pulseaudio server is not running.
+
+This is because:
+- Falcon microphone emulation initializes Portaudio, which uses ALSA
+- Many distributions enable (by default) pulseaudio plugin(s) for ALSA
+  and/or portaudio
+- Pulseaudio plugin aborts when it cannot connect to pulseaudio server
+
+Note: Normal Hatari audio output goes through SDL, which uses
+pulseaudio library directly.  That doesn't have this issue.
+
 
 Old RHEL 5 and the derived CentOS v5.x Linux distributions ship
 with a broken readline library:
@@ -234,16 +231,57 @@ doc/manual.html. Here are just some hints for the impatient people:
   directory, Hatari will ask you to select one.
 
   - Hatari binary packages ship unmodified EmuTOS ROM image with them
-    (renamed as tos.img), but you need an original Atari TOS ROM image
-    for best compatibility.  For more information on EmuTOS, see
-    doc/emutos.txt.
+    (renamed as tos.img), but you may need an original Atari TOS ROM
+    image for better compatibility.  For more information on EmuTOS,
+    see doc/emutos.txt.
 
 * While the emulator is running, you can open the configuration menu
   by pressing F12, the F11 key will toggle fullscreen/windowed mode.
   Pressing ALTGR-q will quit the emulator.
 
 
- 5) Contact
+ 5) Hatari tools and their run-time dependencies
+ -----------------------------------------------
+
+While Hatari installs few binary tools binaries:
+- hmsa (converts between MSA & ST disk images)
+- gst2ascii (outputs a.out and DRI/GST debug symbol table contents)
+
+Most of its tools are Python and shell scripts.
+Their main run-time dependencies are:
+- python (hatariui, hconsole, hatari_profile, atari-convert-dir)
+- python & gtk3 (hatariui)
+- mkdosfs (atari-hd-image)
+- mtools (atari-hd-image / zip2st)
+- unzip (zip2st)
+
+
+ 6) Hatari source subdirectory contents
+ --------------------------------------
+
+* cmake/ -- extra CMake files for configuring Hatari to build environment
+* doc/ -- Hatari documentation
+* etc/ -- old Hatari versions config files for obsolete HW
+* python-ui/ -- external Python / Gtk UI for Hatari
+* share/ -- Hatari desktop integration; icons, mimetypes
+* src/ -- C-sources for Hatari emulator program
+  - convert/ -- screen format conversion functions
+  - cpu/ -- cycle-exact WinUAE CPU core (+FPU/MMU)
+  - uae-cpu/ -- old UAE CPU core (+FPU)
+  - debug/ -- builtin debugger/profiler
+  - falcon/ -- Falcon emulation specific code (Videl used also for TT)
+  - includes/ -- common include files
+  - gui-osx/ -- builtin MacOS GUI
+  - gui-sdl/ -- builtin SDL v1 / v2 GUI for Hatari
+  - gui-win/ -- MS Windows console code + icon
+* tests/ -- shell/python scripts & programs for testing emulator functionality
+* tools/ -- shell/python scripts & programs useful with Hatari
+  - debugger/ -- debug symbol conversion scripts & profile data post-processing tools
+  - hconsole/ -- out-of-process Hatari control / automation tool
+  - hmsa/ -- floppy image format conversion tool
+
+
+ 7) Contact
  ----------
 
 If you want to contact the authors of Hatari, please have a look at the file
@@ -252,4 +290,3 @@ doc/authors.txt for the e-mail addresses or use the Hatari mailing list.
 Visit the website of Hatari on Tuxfamily.org for more details:
 
  http://hatari.tuxfamily.org/contact.html
-

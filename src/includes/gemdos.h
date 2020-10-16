@@ -26,8 +26,11 @@ extern void GemDOS_UnInitDrives(void);
 extern void GemDOS_MemorySnapShot_Capture(bool bSave);
 extern void GemDOS_CreateHardDriveFileName(int Drive, const char *pszFileName, char *pszDestName, int nDestNameLen);
 extern bool GemDOS_IsDriveEmulated(int drive);
-extern void GemDOS_Info(Uint32 bShowOpcodes);
-extern void GemDOS_OpCode(void);
+extern void GemDOS_Info(FILE *fp, Uint32 bShowOpcodes);
+extern void GemDOS_InfoDTA(FILE *fp, Uint32 addrDTA);
+extern int GemDOS_Trap(void);
 extern void GemDOS_Boot(void);
+extern int GemDOS_LoadAndReloc(const char *psPrgName, uint32_t baseaddr, bool bFullBpSetup);
+extern void GemDOS_PexecBpCreated(void);
 
 #endif /* HATARI_GEMDOS_H */

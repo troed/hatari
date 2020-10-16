@@ -232,8 +232,9 @@ SDL_Surface *prepare_texture(int w,int h,int b)
    bitmp->format->Gmask=0x000007E0;
    bitmp->format->Bmask=0x0000001F;
    bitmp->format->Amask=0x00000000;
-   bitmp->format->colorkey=0;
-   bitmp->format->alpha=0;
+// Troed - these are not in SDL2
+//   bitmp->format->colorkey=0;
+//   bitmp->format->alpha=0;
    bitmp->format->palette = NULL;
 
    bitmp->flags=0;

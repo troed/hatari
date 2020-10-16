@@ -64,6 +64,10 @@ const char Main_fileid[] = "Hatari main.c";
 #include "falcon/dsp.h"
 #include "falcon/videl.h"
 
+#ifdef __LIBRETRO__
+#include "retromain.inc"
+#endif
+
 #if HAVE_GETTIMEOFDAY
 #include <sys/time.h>
 #endif
@@ -86,7 +90,7 @@ static bool bAccurateDelays;              /* Host system has an accurate SDL_Del
 static bool bIgnoreNextMouseMotion = false;  /* Next mouse motion will be ignored (needed after SDL_WarpMouse) */
 static bool bAllowMouseWarp = true;       /* disabled when Hatari window loses mouse pointer / key focus */
 
-
+#ifndef __LIBRETRO__
 /*-----------------------------------------------------------------------*/
 /**
  * Return current time as millisecond for performance measurements.
@@ -117,7 +121,7 @@ static Uint32 Main_GetTicks(void)
 # define Main_GetTicks SDL_GetTicks
 #endif
 
-
+#endif //__LIBRETRO__
 //#undef HAVE_GETTIMEOFDAY
 //#undef HAVE_NANOSLEEP
 
@@ -174,7 +178,7 @@ static void	Time_Delay ( Sint64 ticks_micro )
 /**
  * Pause emulation, stop sound.  'visualize' should be set true,
  * unless unpause will be called immediately afterwards.
- * 
+ *
  * @return true if paused now, false if was already paused
  */
 bool Main_PauseEmulation(bool visualize)
@@ -199,7 +203,7 @@ bool Main_PauseEmulation(bool visualize)
 			nVBLCount = nFirstMilliTick = 0;
 			previous = current;
 		}
-		
+
 		Statusbar_AddMessage("Emulation paused", 100);
 		/* make sure msg gets shown */
 		Statusbar_Update(sdlscrn, true);
@@ -214,7 +218,7 @@ bool Main_PauseEmulation(bool visualize)
 /*-----------------------------------------------------------------------*/
 /**
  * Start/continue emulation
- * 
+ *
  * @return true if continued, false if was already running
  */
 bool Main_UnPauseEmulation(void)
@@ -260,6 +264,9 @@ void Main_RequestQuit(int exitval)
 	{
 		/* Assure that CPU core shuts down */
 		M68000_SetSpecial(SPCFLAG_BRK);
+#ifdef __LIBRETRO__
+pauseg=-1;
+#endif //__LIBRETRO__
 	}
 	nQuitValue = exitval;
 }
@@ -322,6 +329,14 @@ void Main_WaitOnVbl(void)
 	static Sint64 DestTicks = 0;
 	Sint64 FrameDuration_micro;
 	Sint64 nDelay;
+
+#ifdef __LIBRETRO__
+if(pauseg==1)pause_select();
+co_switch(mainThread);
+#if defined(WIIU) || defined(VITA)
+return;
+#endif
+#endif //__LIBRETRO__
 
 	nVBLCount++;
 	if (nRunVBLs &&	nVBLCount >= nRunVBLs)
@@ -453,6 +468,13 @@ void Main_WarpMouse(int x, int y, bool restore)
 		return;
 #if WITH_SDL2
 	SDL_WarpMouseInWindow(sdlWindow, x, y);
+
+// Troed: In the LibRetro 1.8 version this was only for non-SDL2
+#ifdef __LIBRETRO__
+fmousex=x;
+fmousey=y;
+#endif //__LIBRETRO__
+
 #else
 	SDL_WarpMouse(x, y);
 #endif
@@ -464,7 +486,11 @@ void Main_WarpMouse(int x, int y, bool restore)
 /**
  * Handle mouse motion event.
  */
+#ifdef __LIBRETRO__
+void Main_HandleMouseMotion()
+#else
 static void Main_HandleMouseMotion(SDL_Event *pEvent)
+#endif //__LIBRETRO__
 {
 	int dx, dy;
 	static int ax = 0, ay = 0;
@@ -476,9 +502,13 @@ static void Main_HandleMouseMotion(SDL_Event *pEvent)
 		bIgnoreNextMouseMotion = false;
 		return;
 	}
-
+#ifdef __LIBRETRO__
+dx = fmousex;
+dy = fmousey;
+#else
 	dx = pEvent->motion.xrel;
 	dy = pEvent->motion.yrel;
+#endif //__LIBRETRO__
 
 	/* In zoomed low res mode, we divide dx and dy by the zoom factor so that
 	 * the ST mouse cursor stays in sync with the host mouse. However, we have
@@ -511,6 +541,10 @@ static void Main_HandleMouseMotion(SDL_Event *pEvent)
  */
 void Main_EventHandler(void)
 {
+#ifdef __LIBRETRO__
+if (ConfigureParams.Sound.bEnableSound)SND=1;
+else SND=-1;
+#else
 	bool bContinueProcessing;
 	SDL_Event event;
 	int events;
@@ -698,6 +732,7 @@ void Main_EventHandler(void)
 			break;
 		}
 	} while (bContinueProcessing || !(bEmulationActive || bQuitProgram));
+#endif //__LIBRETRO__
 }
 
 
@@ -745,7 +780,11 @@ static void Main_Init(void)
 	if (!Log_Init())
 	{
 		fprintf(stderr, "ERROR: logging/tracing initialization failed\n");
-		exit(-1);
+#ifndef __LIBRETRO__
+                exit(-1);
+#else
+                pauseg=-1;
+#endif //__LIBRETRO__
 	}
 	Log_Printf(LOG_INFO, PROG_NAME ", compiled on:  " __DATE__ ", " __TIME__ "\n");
 
@@ -760,7 +799,11 @@ static void Main_Init(void)
 	if ( IPF_Init() != true )
 	{
 		fprintf(stderr, "ERROR: could not initialize the IPF support\n" );
-		exit(-1);
+#ifndef __LIBRETRO__
+                exit(-1);
+#else
+                pauseg=-1;
+#endif //__LIBRETRO__
 	}
 
 	ClocksTimings_InitMachine ( ConfigureParams.System.nMachineType );
@@ -811,13 +854,16 @@ static void Main_Init(void)
 		if (!bTosImageLoaded)
 			fprintf(stderr, "ERROR: failed to load TOS image!\n");
 		SDL_Quit();
+#ifdef __LIBRETRO__
+retro_shutdown_hatari();
+#endif //__LIBRETRO__
 		exit(-2);
 	}
 
 	IoMem_Init();
 	NvRam_Init();
 	Sound_Init();
-	
+
 	/* done as last, needs CPU & DSP running... */
 	DebugUI_Init();
 }
@@ -827,7 +873,11 @@ static void Main_Init(void)
 /**
  * Un-Initialise emulation
  */
+#ifndef __LIBRETRO__
 static void Main_UnInit(void)
+#else
+void Main_UnInit(void)
+#endif //__LIBRETRO__
 {
 	Screen_ReturnFromFullScreen();
 	Floppy_UnInit();
@@ -875,8 +925,13 @@ static void Main_LoadInitialConfig(void)
 	psGlobalConfig = malloc(FILENAME_MAX);
 	if (psGlobalConfig && !getenv("HATARI_TEST"))
 	{
+#ifdef __LIBRETRO__
+snprintf(psGlobalConfig, FILENAME_MAX, "%s%chatari.cfg",RETRO_DIR, PATHSEP);
+printf("RetroConf:'%s'\n",psGlobalConfig);
+#else
 		File_MakePathBuf(psGlobalConfig, FILENAME_MAX, CONFDIR,
 		                 "hatari", "cfg");
+#endif //__LIBRETRO__
 		/* Try to load the global configuration file */
 		Configuration_Load(psGlobalConfig);
 
@@ -946,7 +1001,11 @@ static void Main_StatusbarSetup(void)
  * 
  * Note: 'argv' cannot be declared const, MinGW would then fail to link.
  */
+#ifdef __LIBRETRO__
+int hmain(int argc, char *argv[])
+#else
 int main(int argc, char *argv[])
+#endif //__LIBRETRO__
 {
 	/* Generate random seed */
 	srand(time(NULL));
@@ -970,13 +1029,24 @@ int main(int argc, char *argv[])
 	if (!Opt_ParseParameters(argc, (const char * const *)argv))
 	{
 		Control_RemoveFifo();
+#ifndef __LIBRETRO__
 		return 1;
+#endif //__LIBRETRO__
 	}
+
+#ifdef __LIBRETRO__
+        // After initial configuration was loaded
+        // Set tos.img in retro_system_dir
+        snprintf(ConfigureParams.Rom.szTosImageFileName, FILENAME_MAX, "%s", RETRO_TOS);
+#endif //__LIBRETROO__
+
 	/* monitor type option might require "reset" -> true */
 	Configuration_Apply(true);
 
 #ifdef WIN32
+#ifndef __LIBRETRO__
 	Win_OpenCon();
+#endif //__LIBRETRO__
 #endif
 
 #if HAVE_SETENV
@@ -993,7 +1063,7 @@ int main(int argc, char *argv[])
 
 	/* Set initial Statusbar information */
 	Main_StatusbarSetup();
-	
+
 	/* Check if SDL_Delay is accurate */
 	Main_CheckForAccurateDelays();
 
@@ -1019,6 +1089,8 @@ int main(int argc, char *argv[])
 	}
 	/* Un-init emulation system */
 	Main_UnInit();
-
+#ifdef __LIBRETRO__
+pauseg=-1;
+#endif //__LIBRETRO__
 	return nQuitValue;
 }

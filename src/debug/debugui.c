@@ -1146,7 +1146,8 @@ void DebugUI(debug_reason_t reason)
 	 * this is invoked from.  E.g. returning from fullscreen
 	 * enables grab if that was enabled on windowed mode.
 	 */
-	SDL_WM_GrabInput(SDL_GRAB_OFF);
+// Troed: Todo, why is this SDL1 method still here?
+//	SDL_WM_GrabInput(SDL_GRAB_OFF);
 
 	DebugUI_Init();
 

@@ -18,6 +18,8 @@ endif
 endif
 
 EXTERNAL_ZLIB = 0
+CFLAGS += -DWITH_SDL2 
+CFLAGS += -DHAVE_UTIME_H 
 
 TARGET_NAME	:= hatari
 GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"

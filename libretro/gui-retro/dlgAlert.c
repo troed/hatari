@@ -16,7 +16,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License (gpl.txt) for more details.
  */
-const char DlgAlert_fileid[] = "Hatari dlgAlert.c : " __DATE__ " " __TIME__;
+const char DlgAlert_fileid[] = "Hatari dlgAlert.c";
 
 #include <string.h>
 
@@ -24,8 +24,8 @@ const char DlgAlert_fileid[] = "Hatari dlgAlert.c : " __DATE__ " " __TIME__;
 #include "dialog.h"
 #include "screen.h"
 #include "sdlgui.h"
+#include "str.h"
 
-#include "gui-retro.h"
 
 #define MAX_LINES 4
 
@@ -48,9 +48,9 @@ static SGOBJ alertdlg[] =
 	{ SGTEXT, 0, 0, 1,2, 50,1, dlglines[1] },
 	{ SGTEXT, 0, 0, 1,3, 50,1, dlglines[2] },
 	{ SGTEXT, 0, 0, 1,4, 50,1, dlglines[3] },
-	{ SGBUTTON,  SG_EXIT/*SG_DEFAULT*/, 0, 5,5, 8,1, "OK" },
-	{ SGBUTTON,  SG_EXIT/*SG_CANCEL*/, 0, 24,5, 8,1, "Cancel" },
-	{ -1, 0, 0, 0,0, 0,0, NULL }
+	{ SGBUTTON, SG_DEFAULT, 0, 5,5, 8,1, "OK" },
+	{ SGBUTTON, SG_CANCEL, 0, 24,5, 8,1, NULL },
+	{ SGSTOP, 0, 0, 0,0, 0,0, NULL }
 };
 
 
@@ -126,22 +126,17 @@ static int DlgAlert_FormatTextToBox(char *text, int max_width, int *text_width)
 static int DlgAlert_ShowDlg(const char *text)
 {
 	static int maxlen = sizeof(dlglines[0])-1;
-	char *t = (char *)malloc(strlen(text)+1);
+	char *t = Str_Alloc(strlen(text));
 	char *orig_t = t;
 	int lines, i, len, offset;
 	bool bOldMouseVisibility;
 	int nOldMouseX, nOldMouseY;
+	bool bWasEmuActive;
 
-	static int pauseon=0; 
-
-	if(pauseg==0){
-		//HACK fix crash if alert dialog appear before pause was set to ON or before the first co_switch in main thread. 
-		printf("set pause on!\n");
-		pauseg=1;
-		pauseon=1; 
-		gui_poll_events();
-	}
-
+#if WITH_SDL2
+	bool bOldMouseMode = SDL_GetRelativeMouseMode();
+	SDL_SetRelativeMouseMode(SDL_FALSE);
+#endif
 	strcpy(t, text);
 	lines = DlgAlert_FormatTextToBox(t, maxlen, &len);
 	offset = (maxlen-len)/2;
@@ -167,28 +162,24 @@ static int DlgAlert_ShowDlg(const char *text)
 		return false;
 	SDLGui_CenterDlg(alertdlg);
 
+	bWasEmuActive = Main_PauseEmulation(true);
+
 	SDL_GetMouseState(&nOldMouseX, &nOldMouseY);
 	bOldMouseVisibility = SDL_ShowCursor(SDL_QUERY);
 	SDL_ShowCursor(SDL_ENABLE);
 
-        do
-	{                     
-	       i = SDLGui_DoDialog(alertdlg, NULL);
-               gui_poll_events();
-
-	}
-	while (i != DLGALERT_OK && i != DLGALERT_CANCEL && i != SDLGUI_QUIT
-	        && i != SDLGUI_ERROR && !bQuitProgram);
+	i = SDLGui_DoDialog(alertdlg, NULL, false);
 
 	SDL_UpdateRect(sdlscrn, 0,0, 0,0);
 	SDL_ShowCursor(bOldMouseVisibility);
-	Main_WarpMouse(nOldMouseX, nOldMouseY);
+	Main_WarpMouse(nOldMouseX, nOldMouseY, true);
 
-	if(pauseon==1){
-		printf("set pause off!\n");
-		pauseg=0;
-		pauseon=0;
-	}
+#if WITH_SDL2
+	SDL_SetRelativeMouseMode(bOldMouseMode);
+#endif
+
+	if (bWasEmuActive)
+		Main_UnPauseEmulation();
 
 	return (i == DLGALERT_OK);
 }
@@ -200,8 +191,11 @@ static int DlgAlert_ShowDlg(const char *text)
  */
 int DlgAlert_Notice(const char *text)
 {
-#ifdef ALERT_HOOKS 
-	return HookedAlertNotice(text);
+#ifdef ALERT_HOOKS
+	if (!Main_UnPauseEmulation())
+		Main_PauseEmulation(true);
+	if(!bInFullScreen)
+		return HookedAlertNotice(text);
 #endif
 
 	/* Hide "cancel" button: */
@@ -224,7 +218,8 @@ int DlgAlert_Notice(const char *text)
 int DlgAlert_Query(const char *text)
 {
 #ifdef ALERT_HOOKS
-	return HookedAlertQuery(text);
+	if(!bInFullScreen)
+		return HookedAlertQuery(text);
 #endif
 
 	/* Show "cancel" button: */

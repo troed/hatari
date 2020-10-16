@@ -1,6 +1,9 @@
 LIBRETRO_COMM_DIR := $(LIBRETRO_DIR)/libretro-common
 
-INCFLAGS := -I$(EMU) \
+INCFLAGS := \
+				-I/usr/include/ \
+				-I/usr/include/SDL2/ \
+				-I$(EMU) \
 				-I$(CPU) \
 				-I$(FALCON) \
 				-I$(EMU)/includes \
@@ -40,7 +43,7 @@ endif
 #				 $(CPU_PREGEN)/cpustbl.c \
 
 SOURCES_C += \
-				 $(CPU)/build68k.c \
+#				 $(CPU)/build68k.c \
 				 $(CPU)/fpp.c \
 				 $(CPU)/gencpu.c \
 				 $(CPU)/hatari-glue.c \
@@ -48,9 +51,12 @@ SOURCES_C += \
 				 $(CPU)/newcpu.c \
 				 $(CPU)/readcpu.c \
 				 $(GUI)/dlgAbout.c \
+				 $(GUI)/dlgAlert.c \
+				 $(GUI)/dlgCpu.c \
 				 $(GUI)/dlgDevice.c \
 				 $(GUI)/dlgFileSelect.c \
 				 $(GUI)/dlgFloppy.c \
+				 $(GUI)/dlgHalt.c \
 				 $(GUI)/dlgHardDisk.c \
 				 $(GUI)/dlgJoystick.c \
 				 $(GUI)/dlgKeyboard.c \
@@ -67,7 +73,6 @@ SOURCES_C += \
 				 $(FALCON)/dsp_core.c \
 				 $(FALCON)/dsp_cpu.c \
 				 $(FALCON)/dsp_disasm.c \
-				 $(FALCON)/hostscreen.c \
 				 $(FALCON)/microphone.c \
 				 $(FALCON)/nvram.c \
 				 $(FALCON)/videl.c \
@@ -86,6 +91,7 @@ SOURCES_C += \
 				 $(DBG)/natfeats.c \
 				 $(DBG)/console.c \
 				 $(DBG)/68kDisass.c \
+				 $(DBG)/vars.c \
 				 $(FLP)/createBlankImage.c \
 				 $(FLP)/dim.c \
 				 $(FLP)/msa.c \
@@ -98,10 +104,9 @@ SOURCES_C += \
 				 $(EMU)/blitter.c \
 				 $(EMU)/cart.c \
 				 $(EMU)/cfgopts.c \
+				 $(EMU)/change.c \
 				 $(EMU)/clocks_timings.c \
 				 $(EMU)/configuration.c \
-				 $(EMU)/options.c \
-				 $(EMU)/change.c \
 				 $(EMU)/control.c \
 				 $(EMU)/cycInt.c \
 				 $(EMU)/cycles.c \
@@ -117,6 +122,7 @@ SOURCES_C += \
 				 $(EMU)/hdc.c \
 				 $(EMU)/ide.c \
 				 $(EMU)/ikbd.c \
+				 $(EMU)/inffile.c \
 				 $(EMU)/ioMem.c \
 				 $(EMU)/ioMemTabST.c \
 				 $(EMU)/ioMemTabSTE.c \
@@ -124,27 +130,34 @@ SOURCES_C += \
 				 $(EMU)/ioMemTabFalcon.c \
 				 $(EMU)/joy.c \
 				 $(EMU)/keymap.c \
+				 $(EMU)/lilo.c \
 				 $(EMU)/m68000.c \
 				 $(EMU)/main.c \
-				 $(EMU)/midi.c \
 				 $(EMU)/memorySnapShot.c \
 				 $(EMU)/mfp.c \
+				 $(EMU)/midi.c \
+				 $(EMU)/msa.c \
+				 $(EMU)/ncr5380.c \
+				 $(EMU)/nf_scsidrv.c \
+				 $(EMU)/options.c \
 				 $(EMU)/paths.c \
-				 $(EMU)/psg.c \
 				 $(EMU)/printer.c \
+				 $(EMU)/psg.c \
+				 $(EMU)/reset.c \
 				 $(EMU)/resolution.c \
 				 $(EMU)/rs232.c \
-				 $(EMU)/reset.c \
 				 $(EMU)/rtc.c \
 				 $(EMU)/scandir.c \
-				 $(EMU)/stMemory.c \
+				 $(EMU)/scc.c \
 				 $(EMU)/screen.c \
+				 $(EMU)/screenConvert.c \
 				 $(EMU)/screenSnapShot.c \
 				 $(EMU)/shortcut.c \
 				 $(EMU)/sound.c \
 				 $(EMU)/spec512.c \
 				 $(EMU)/statusbar.c \
 				 $(EMU)/str.c \
+				 $(EMU)/stMemory.c \
 				 $(EMU)/tos.c \
 				 $(EMU)/unzip.c \
 				 $(EMU)/utils.c \
@@ -158,7 +171,7 @@ SOURCES_C += \
 				 $(LIBRETRO_DIR)/hatari-mapper.c \
 				 $(LIBRETRO_DIR)/vkbd.c \
 				 $(LIBRETRO_DIR)/graph.c \
-				 $(LIBRETRO_DIR)/bmp.c \
+#				 $(LIBRETRO_DIR)/bmp.c \
 				 $(LIBRETRO_DIR)/retro_strings.c \
 				 $(LIBRETRO_DIR)/retro_files.c \
 				 $(LIBRETRO_DIR)/retro_disk_control.c \

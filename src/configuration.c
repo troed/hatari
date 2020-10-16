@@ -11,6 +11,9 @@
 */
 const char Configuration_fileid[] = "Hatari configuration.c";
 
+#ifdef __LIBRETRO__
+#include <SDL.h>
+#endif
 #include <SDL_keyboard.h>
 #include <SDL_joystick.h>
 

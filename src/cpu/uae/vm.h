@@ -9,7 +9,9 @@
 #ifndef UAE_VM_H
 #define UAE_VM_H
 
-#include "uae/types.h"
+//#include "uae/types.h"
+//
+#include "types.h"
 
 #define UAE_VM_WRITE 2
 #define UAE_VM_EXECUTE 4

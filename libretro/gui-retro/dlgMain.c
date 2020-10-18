@@ -114,7 +114,8 @@ int Dialog_MainDlg(bool *bReset, bool *bLoadedSnapshot)
 			Dialog_WindowDlg();
 			break;
 		 case MAINDLG_SYSTEM:
-			Dialog_SystemDlg();
+			DlgSystem_Main();
+//			Dialog_SystemDlg();
 			break;
 		 case MAINDLG_MEMORY:
 			if (Dialog_MemDlg())

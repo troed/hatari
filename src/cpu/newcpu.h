@@ -13,7 +13,9 @@
 #include "readcpu.h"
 #include "machdep/m68k.h"
 #include "events.h"
-#include <softfloat/softfloat.h>
+//#include <softfloat/softfloat.h>
+//Troed
+#include "softfloat/softfloat.h"
 
 #ifdef WINUAE_FOR_HATARI
 #include "compat.h"

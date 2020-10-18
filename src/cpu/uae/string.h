@@ -4,7 +4,9 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "uae/types.h"
+//#include "uae/types.h"
+// Troed
+#include "types.h"
 #include <string.h>
 
 #ifdef _WIN32

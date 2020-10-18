@@ -1,1 +1,3 @@
-#include "uae/time.h"
+//#include "uae/time.h"
+// Troed
+#include "../uae/time.h"

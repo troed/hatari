@@ -3,22 +3,21 @@ LIBRETRO_COMM_DIR := $(LIBRETRO_DIR)/libretro-common
 INCFLAGS := \
 				-I/usr/include/ \
 				-I/usr/include/SDL2/ \
-				-I$(EMU) \
-				-I$(CP) \
-				-I$(CPU) \
+				-I$(CORE_DIR)/src \
 				-I$(FALCON) \
-				-I$(EMU)/includes \
+				-I$(CORE_DIR)/src/includes \
+				-I$(CPU) \
 				-I$(DBG) \
 				-I$(FLP) \
 				-I$(LIBRETRO_DIR) \
 				-I$(LIBRETRO_COMM_DIR)/include \
 				-I$(LIBRETRO_COMM_DIR)/include/compat/zlib \
 				-I$(LIBRETRO_DIR)/include \
-				-I$(LIBUTILS) \
-				-I$(CPU_PREGEN) 
+				-I$(LIBUTILS)
 
 SOURCES_C   :=
 SOURCES_CXX :=
+HATARI_C   :=
 
 ifeq ($(EXTERNAL_ZLIB), 1)
 SOURCES_C += \
@@ -39,16 +38,77 @@ SOURCES_C += \
 				 $(ZLIB_DIR)/zutil.c 
 endif
 
+HATARI_C += \
+				 $(HATARI_DIR)/acia.c \
+				 $(HATARI_DIR)/audio.c \
+				 $(HATARI_DIR)/avi_record.c \
+				 $(HATARI_DIR)/bios.c \
+				 $(HATARI_DIR)/blitter.c \
+				 $(HATARI_DIR)/cart.c \
+				 $(HATARI_DIR)/cfgopts.c \
+				 $(HATARI_DIR)/clocks_timings.c \
+				 $(HATARI_DIR)/configuration.c \
+				 $(HATARI_DIR)/options.c \
+				 $(HATARI_DIR)/change.c \
+				 $(HATARI_DIR)/control.c \
+				 $(HATARI_DIR)/cycInt.c \
+				 $(HATARI_DIR)/cycles.c \
+				 $(HATARI_DIR)/dialog.c \
+				 $(HATARI_DIR)/dmaSnd.c \
+				 $(HATARI_DIR)/fdc.c \
+				 $(HATARI_DIR)/file.c \
+				 $(HATARI_DIR)/floppy.c \
+				 $(HATARI_DIR)/floppy_ipf.c \
+				 $(HATARI_DIR)/floppy_stx.c \
+				 $(HATARI_DIR)/gemdos.c \
+				 $(HATARI_DIR)/hd6301_cpu.c \
+				 $(HATARI_DIR)/hdc.c \
+				 $(HATARI_DIR)/ide.c \
+				 $(HATARI_DIR)/ikbd.c \
+				 $(HATARI_DIR)/ioMem.c \
+				 $(HATARI_DIR)/ioMemTabST.c \
+				 $(HATARI_DIR)/ioMemTabSTE.c \
+				 $(HATARI_DIR)/ioMemTabTT.c \
+				 $(HATARI_DIR)/ioMemTabFalcon.c \
+				 $(HATARI_DIR)/joy.c \
+				 $(HATARI_DIR)/keymap.c \
+				 $(HATARI_DIR)/m68000.c \
+				 $(HATARI_DIR)/main.c \
+				 $(HATARI_DIR)/midi.c \
+				 $(HATARI_DIR)/memorySnapShot.c \
+				 $(HATARI_DIR)/mfp.c \
+				 $(HATARI_DIR)/nf_scsidrv.c \
+				 $(HATARI_DIR)/ncr5380.c \
+				 $(HATARI_DIR)/paths.c \
+				 $(HATARI_DIR)/psg.c \
+				 $(HATARI_DIR)/printer.c \
+				 $(HATARI_DIR)/resolution.c \
+				 $(HATARI_DIR)/rs232.c \
+				 $(HATARI_DIR)/reset.c \
+				 $(HATARI_DIR)/rtc.c \
+				 $(HATARI_DIR)/scandir.c \
+				 $(HATARI_DIR)/scc.c \
+				 $(HATARI_DIR)/stMemory.c \
+				 $(HATARI_DIR)/screen.c \
+				 $(HATARI_DIR)/screenConvert.c \
+				 $(HATARI_DIR)/screenSnapShot.c \
+				 $(HATARI_DIR)/shortcut.c \
+				 $(HATARI_DIR)/sound.c \
+				 $(HATARI_DIR)/spec512.c \
+				 $(HATARI_DIR)/statusbar.c \
+				 $(HATARI_DIR)/str.c \
+				 $(HATARI_DIR)/tos.c \
+				 $(HATARI_DIR)/utils.c \
+				 $(HATARI_DIR)/vdi.c \
+				 $(HATARI_DIR)/inffile.c \
+				 $(HATARI_DIR)/video.c \
+				 $(HATARI_DIR)/wavFormat.c \
+				 $(HATARI_DIR)/xbios.c \
+				 $(HATARI_DIR)/ymFormat.c \
+				 $(HATARI_DIR)/lilo.c \
+				 $(HATARI_DIR)/unzip.c 
+
 SOURCES_C += \
-				 $(CPU_PREGEN)/cpudefs.c \
-				 $(CPU_PREGEN)/cpuemu.c \
-				 $(CPU_PREGEN)/cpustbl.c \
-				 $(CPU)/fpp.c \
-				 $(CPU)/gencpu.c \
-				 $(CPU)/hatari-glue.c \
-				 $(CPU)/memory.c \
-				 $(CPU)/newcpu.c \
-				 $(CPU)/readcpu.c \
 				 $(GUI)/dlgAbout.c \
 				 $(GUI)/dlgAlert.c \
 				 $(GUI)/dlgCpu.c \
@@ -67,112 +127,15 @@ SOURCES_C += \
 				 $(GUI)/dlgSound.c \
 				 $(GUI)/dlgSystem.c \
 				 $(GUI)/sdlgui.c \
-				 $(FALCON)/crossbar.c \
-				 $(FALCON)/dsp.c \
-				 $(FALCON)/dsp_core.c \
-				 $(FALCON)/dsp_cpu.c \
-				 $(FALCON)/dsp_disasm.c \
-				 $(FALCON)/microphone.c \
-				 $(FALCON)/nvram.c \
-				 $(FALCON)/videl.c \
-				 $(DBG)/log.c \
-				 $(DBG)/debugui.c \
-				 $(DBG)/breakcond.c \
-				 $(DBG)/debugcpu.c \
-				 $(DBG)/debugInfo.c \
-				 $(DBG)/debugdsp.c \
-				 $(DBG)/evaluate.c \
-				 $(DBG)/history.c \
-				 $(DBG)/symbols.c \
-				 $(DBG)/profile.c \
-				 $(DBG)/profilecpu.c \
-				 $(DBG)/profiledsp.c \
-				 $(DBG)/natfeats.c \
-				 $(DBG)/console.c \
-				 $(DBG)/68kDisass.c \
-				 $(DBG)/vars.c \
-				 $(FLP)/createBlankImage.c \
-				 $(FLP)/dim.c \
-				 $(FLP)/msa.c \
-				 $(FLP)/st.c \
-				 $(FLP)/zip.c \
-				 $(EMU)/acia.c \
-				 $(EMU)/audio.c \
-				 $(EMU)/avi_record.c \
-				 $(EMU)/bios.c \
-				 $(EMU)/blitter.c \
-				 $(EMU)/cart.c \
-				 $(EMU)/cfgopts.c \
-				 $(EMU)/change.c \
-				 $(EMU)/clocks_timings.c \
-				 $(EMU)/configuration.c \
-				 $(EMU)/control.c \
-				 $(EMU)/cycInt.c \
-				 $(EMU)/cycles.c \
-				 $(EMU)/dialog.c \
-				 $(EMU)/dmaSnd.c \
-				 $(EMU)/fdc.c \
-				 $(EMU)/file.c \
-				 $(EMU)/floppy.c \
-				 $(EMU)/floppy_ipf.c \
-				 $(EMU)/floppy_stx.c \
-				 $(EMU)/gemdos.c \
-				 $(EMU)/hd6301_cpu.c \
-				 $(EMU)/hdc.c \
-				 $(EMU)/ide.c \
-				 $(EMU)/ikbd.c \
-				 $(EMU)/inffile.c \
-				 $(EMU)/ioMem.c \
-				 $(EMU)/ioMemTabST.c \
-				 $(EMU)/ioMemTabSTE.c \
-				 $(EMU)/ioMemTabTT.c \
-				 $(EMU)/ioMemTabFalcon.c \
-				 $(EMU)/joy.c \
-				 $(EMU)/keymap.c \
-				 $(EMU)/lilo.c \
-				 $(EMU)/m68000.c \
-				 $(EMU)/main.c \
-				 $(EMU)/memorySnapShot.c \
-				 $(EMU)/mfp.c \
-				 $(EMU)/midi.c \
-				 $(EMU)/msa.c \
-				 $(EMU)/ncr5380.c \
-				 $(EMU)/nf_scsidrv.c \
-				 $(EMU)/options.c \
-				 $(EMU)/paths.c \
-				 $(EMU)/printer.c \
-				 $(EMU)/psg.c \
-				 $(EMU)/reset.c \
-				 $(EMU)/resolution.c \
-				 $(EMU)/rs232.c \
-				 $(EMU)/rtc.c \
-				 $(EMU)/scandir.c \
-				 $(EMU)/scc.c \
-				 $(EMU)/screen.c \
-				 $(EMU)/screenConvert.c \
-				 $(EMU)/screenSnapShot.c \
-				 $(EMU)/shortcut.c \
-				 $(EMU)/sound.c \
-				 $(EMU)/spec512.c \
-				 $(EMU)/statusbar.c \
-				 $(EMU)/str.c \
-				 $(EMU)/stMemory.c \
-				 $(EMU)/tos.c \
-				 $(EMU)/unzip.c \
-				 $(EMU)/utils.c \
-				 $(EMU)/vdi.c \
-				 $(EMU)/video.c \
-				 $(EMU)/wavFormat.c \
-				 $(EMU)/xbios.c \
-				 $(EMU)/ymFormat.c \
 				 $(LIBRETRO_COMM_DIR)/libco/libco.c \
 				 $(LIBRETRO_DIR)/libretro.c \
 				 $(LIBRETRO_DIR)/hatari-mapper.c \
 				 $(LIBRETRO_DIR)/vkbd.c \
 				 $(LIBRETRO_DIR)/graph.c \
-#				 $(LIBRETRO_DIR)/bmp.c \
 				 $(LIBRETRO_DIR)/retro_strings.c \
 				 $(LIBRETRO_DIR)/retro_files.c \
 				 $(LIBRETRO_DIR)/retro_disk_control.c \
-				 $(LIBRETRO_DIR)/stub/dlgAlert.c \
 				 $(ZLIB_SRCS)
+
+#				 $(LIBRETRO_DIR)/stub/dlgAlert.c \
+#				 $(LIBRETRO_DIR)/bmp.c \

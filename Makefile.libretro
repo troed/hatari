@@ -1,5 +1,6 @@
 CORE_DIR := .
 LIBRETRO_DIR = $(CORE_DIR)/libretro
+HATARI_DIR := $(CORE_DIR)/src/CMakeFiles/hatari.dir
 ZLIB_DIR = $(LIBRETRO_DIR)/utils/zlib
 STATIC_LINKING=0
 STATIC_LINKING_LINK=0
@@ -19,7 +20,10 @@ endif
 
 EXTERNAL_ZLIB = 0
 CFLAGS += -DWITH_SDL2 
+CFLAGS += -D_REENTRANT 
 CFLAGS += -DHAVE_UTIME_H 
+CFLAGS += -DENABLE_WINUAE_CPU 
+CFLAGS += -DWINUAE_FOR_HATARI 
 
 TARGET_NAME	:= hatari
 GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
@@ -208,32 +212,35 @@ CFLAGS   += $(fpic) $(PLATFLAGS)
 CXXFLAGS := $(CFLAGS)
 CPPFLAGS := $(CFLAGS)
 
-EMU = $(CORE_DIR)/src
-CP = $(EMU)/cpu
-CPU = $(EMU)/uae-cpu
-FALCON = $(EMU)/falcon
-DBG = $(EMU)/debug
-FLP = $(EMU)
-GUI = $(LIBRETRO_DIR)/gui-retro
-CPU_PREGEN = $(LIBRETRO_DIR)/uae-cpu-pregen
-LIBUTILS = $(LIBRETRO_DIR)/utils
+#LDFLAGS += -lSDL2
 
-$(info    $(EMU) is $(EMU))
-$(info    $(CPU) is $(CPU))
+CPU = $(CORE_DIR)/src/cpu
+#CPU = $(EMU)/uae-cpu
+FALCON = $(CORE_DIR)/src/falcon
+DBG = $(CORE_DIR)/src/debug
+FLP = $(CORE_DIR)/src
+GUI = $(LIBRETRO_DIR)/gui-retro
+#CPU_PREGEN = $(LIBRETRO_DIR)/uae-cpu-pregen
+LIBUTILS = $(LIBRETRO_DIR)/utils
 
 include Makefile.common
 
-$(info    $(SOURCES_C) is $(SOURCES_C))
+# Re-use Hatari object files from its native build process
+OBJECTS := $(HATARI_C:.c=.c.o)
+# Build libretro specific files
+OBJECTS += $(SOURCES_C:.c=.o)
+# Re-use libraries created from Hatari's native build process
+HATARI_LIB := $(CPU)/libUaeCpu.a $(FALCON)/libFalcon.a $(FLP)/libFloppy.a $(DBG)/libDebug.a
 
-OBJECTS := $(SOURCES_C:.c=.o)
+SHARED += -lSDL2 -lpng /usr/local/lib/libcapsimage.so -ludev -lreadline -lz -lSM -lICE -lX11 -lXext 
 
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING_LINK),1)
-	$(AR) rcs $@ $(OBJECTS) 
+	$(AR) rcs $@ $(OBJECTS) $(HATARI_LIB) 
 else
-	$(CC) $(CFLAGS) $(INCFLAGS) $(LDFLAGS) $(OBJECTS) -o $@ -lm $(ZLIB) $(SHARED)
+	$(CC) $(CFLAGS) $(INCFLAGS) $(LDFLAGS) $(OBJECTS) $(HATARI_LIB) -o $@ -lm $(ZLIB) $(SHARED)
 endif
 
 %.o: %.c

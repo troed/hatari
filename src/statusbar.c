@@ -179,6 +179,9 @@ int Statusbar_SetHeight(int width, int height)
 	DEBUGPRINT(("Statusbar_SetHeight(%d, %d) -> %d\n", width, height, StatusbarHeight));
 	return StatusbarHeight;
 }
+#ifdef __LIBRETRO__
+int LEDA=0, LEDB=0, LEDC=0;
+#endif
 
 /*-----------------------------------------------------------------------*/
 /**

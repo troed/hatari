@@ -28,7 +28,7 @@ extern short signed int SNDBUF[1024*2];
 extern char RPATH[512];
 extern char RETRO_DIR[512];
 extern char RETRO_TOS[512];
-extern struct retro_midi_interface *MidiRetroInterface;
+//extern struct retro_midi_interface *MidiRetroInterface;
 
 #include "cmdline.c"
 
@@ -484,13 +484,14 @@ void retro_init(void)
 	};
 	environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, &inputDescriptors);
 
-   static struct retro_midi_interface midi_interface;
+// Troed: Figure out MIDI later
+/*   static struct retro_midi_interface midi_interface;
 
    if(environ_cb(RETRO_ENVIRONMENT_GET_MIDI_INTERFACE, &midi_interface))
       MidiRetroInterface = &midi_interface;
    else
       MidiRetroInterface = NULL;
-
+*/
  	// Disk control interface
 	environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_interface);
 
@@ -632,8 +633,8 @@ void retro_run(void)
 
    co_switch(emuThread);
 
-   if (MidiRetroInterface && MidiRetroInterface->output_enabled())
-      MidiRetroInterface->flush();
+//   if (MidiRetroInterface && MidiRetroInterface->output_enabled())
+//      MidiRetroInterface->flush();
   
    if (firstpass)
       firstpass=0;

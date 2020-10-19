@@ -4,6 +4,7 @@ HATARI_DIR := $(CORE_DIR)/src/CMakeFiles/hatari.dir
 ZLIB_DIR = $(LIBRETRO_DIR)/utils/zlib
 STATIC_LINKING=0
 STATIC_LINKING_LINK=0
+SHELL = bash
 
 ifeq ($(platform),)
 platform = unix
@@ -23,10 +24,9 @@ CFLAGS += -DWITH_SDL2
 CFLAGS += -D_REENTRANT 
 CFLAGS += -DHAVE_UTIME_H 
 CFLAGS += -DENABLE_WINUAE_CPU 
-CFLAGS += -DWINUAE_FOR_HATARI 
 
 TARGET_NAME	:= hatari
-GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
+GIT_VERSION := "$(shell git rev-parse --short HEAD || echo unknown)"
 ifneq ($(GIT_VERSION)," unknown")
 	CFLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 endif
@@ -212,41 +212,41 @@ CFLAGS   += $(fpic) $(PLATFLAGS)
 CXXFLAGS := $(CFLAGS)
 CPPFLAGS := $(CFLAGS)
 
-#LDFLAGS += -lSDL2
-
 CPU = $(CORE_DIR)/src/cpu
-#CPU = $(EMU)/uae-cpu
 FALCON = $(CORE_DIR)/src/falcon
 DBG = $(CORE_DIR)/src/debug
 FLP = $(CORE_DIR)/src
 GUI = $(LIBRETRO_DIR)/gui-retro
-#CPU_PREGEN = $(LIBRETRO_DIR)/uae-cpu-pregen
 LIBUTILS = $(LIBRETRO_DIR)/utils
 
 include Makefile.common
 
 # Re-use Hatari object files from its native build process
-OBJECTS := $(HATARI_C:.c=.c.o)
+#OBJECTS := $(HATARI_O)
 # Build libretro specific files
 OBJECTS += $(SOURCES_C:.c=.o)
-# Re-use libraries created from Hatari's native build process
+# Re-use libraries created from Hatari's native build process when linking
 HATARI_LIB := $(CPU)/libUaeCpu.a $(FALCON)/libFalcon.a $(FLP)/libFloppy.a $(DBG)/libDebug.a
 
 SHARED += -lSDL2 -lpng /usr/local/lib/libcapsimage.so -ludev -lreadline -lz -lSM -lICE -lX11 -lXext 
 
-all: $(TARGET)
+all: pre-build $(TARGET)
+
+pre-build:
+# Use Hatari's cmake build system to build all libraries and most other object files. It will fail to link the final Hatari executable, which is fine for our use
+	- cmake -DCMAKE_C_FLAGS="$(CFLAGS) -I/usr/include -I/usr/include/SDL2 -I../libretro -I../libretro/libretro-common/include -I../libretro/libretro-common/include/compat/zlib -I../libretro/include -I../libretro/utils" .;VERBOSE=1 make
 
 $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING_LINK),1)
-	$(AR) rcs $@ $(OBJECTS) $(HATARI_LIB) 
+	$(AR) rcs $@ $(OBJECTS) $(HATARI_O) $(HATARI_LIB) 
 else
-	$(CC) $(CFLAGS) $(INCFLAGS) $(LDFLAGS) $(OBJECTS) $(HATARI_LIB) -o $@ -lm $(ZLIB) $(SHARED)
+	$(CC) $(CFLAGS) $(INCFLAGS) $(LDFLAGS) $(OBJECTS) $(HATARI_O) $(HATARI_LIB) -o $@ -lm $(ZLIB) $(SHARED)
 endif
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJECTS) $(TARGET) 
+	rm -f $(OBJECTS) $(HATARI_O) $(TARGET) $(HATARI_LIB) 
 
 .PHONY: clean

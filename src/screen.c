@@ -496,8 +496,9 @@ bool Screen_SetSDLVideoSize(int width, int height, int bitdepth, bool bForceChan
 	}
 	else
 	{
-// Troed: Re-use libretro's? If so all SDL stuff needs to be removed
-//        since we just want to render to framebuffer?
+// libretro: We allow Hatari to create a window to make code patching minimal, however,
+//           we force its flags to hidden using an SDL overload define
+
 		sdlWindow = SDL_CreateWindow("Hatari", SDL_WINDOWPOS_UNDEFINED,
 		                             SDL_WINDOWPOS_UNDEFINED,
 		                             win_width, win_height, sdlVideoFlags);
@@ -646,7 +647,8 @@ static void Screen_SetSTResolution(bool bForceChange)
 	Resolution_GetLimits(&maxW, &maxH, &BitCount, Screen_WantToKeepResolution());
 
 	/* Zoom if necessary, factors used for scaling mouse motions */
-	if (STRes == ST_LOW_RES &&
+// Troed
+/*	if (STRes == ST_LOW_RES &&
 	    2*Width <= maxW && 2*Height+SBarHeight <= maxH)
 	{
 		nZoom = 2;
@@ -656,7 +658,7 @@ static void Screen_SetSTResolution(bool bForceChange)
 		nScreenZoomY = 2;
 		bDoubleLowRes = true;
 	}
-	else if (STRes == ST_MEDIUM_RES)
+	else*/ if (STRes == ST_MEDIUM_RES)
 	{
 		/* med-rez conversion functions want always
 		 * to double vertically, they don't support

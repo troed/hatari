@@ -40,9 +40,11 @@ static unsigned long Ktime=0, LastFPSTime=0;
 //VIDEO
 extern SDL_Surface *sdlscrn; // returned to Hatari to make sure NULL pointer exceptions don't happen
 
-unsigned short int bmp[1024*1024]; // the framebuffer used by libretro video callback
+//extern int genconv_bpp; // contains bitdepth Hatari is working with
 
-unsigned char savbkg[1024*1024* 2];
+Uint16 bmp[1024*1024]; // the framebuffer used by libretro video callback
+
+Uint16 savbkg[1024*1024* 2];
 
 //SOUND
 short signed int SNDBUF[1024*2];
@@ -176,17 +178,24 @@ void save_bkg(void)
    }
 }
 
+retro_listmodes()
+{
+
+}
+
 void retro_updaterects(SDL_Surface * surf,int num,SDL_Rect *rects)
 {
 // draw all rects with src surf into bmp (5,6,5 format)
-   unsigned char *ptr = (unsigned char*)surf->pixels;
 
-   for(int r=0; r<num; r++) {
+   Uint16 *ptr = (Uint16*)surf->pixels;
+   int bpp = surf->format->BytesPerPixel;
+   for(int r=0; r<num; r++)
+   {
       for(int i=0; i<rects[r].w; i++)
       {
          for(int j=0; j<rects[r].h; j++)
          {
-            bmp[i+j*VIRTUAL_WIDTH] = ptr[i+j*surf->pitch];
+            bmp[i+j*VIRTUAL_WIDTH] = ptr[i+(j*surf->pitch)/bpp];
          }
       }
    }
@@ -221,6 +230,11 @@ void texture_uninit(void)
    }
 }
 
+SDL_Surface *retro_creatergbsurface(Uint32 f,int w,int h,int d,Uint32 rmask,Uint32 gmask,Uint32 bmask,Uint32 amask)
+{
+   return prepare_texture(w,h,d);
+}
+
 SDL_Surface *prepare_texture(int w,int h,int b)
 {
    SDL_Surface *bitmp;
@@ -228,6 +242,7 @@ SDL_Surface *prepare_texture(int w,int h,int b)
    if(sdlscrn)
       texture_uninit();
 
+   // we're likely leaking this memory
    bitmp = (SDL_Surface *) calloc(1, sizeof(*bitmp));
    if (bitmp == NULL)
    {
@@ -235,6 +250,7 @@ SDL_Surface *prepare_texture(int w,int h,int b)
       return NULL;
    }
 
+   // we're likely leaking this memory
    bitmp->format = calloc(1,sizeof(*bitmp->format));
    if (bitmp->format == NULL)
    {

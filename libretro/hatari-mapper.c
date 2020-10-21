@@ -38,8 +38,10 @@ long frame=0;
 static unsigned long Ktime=0, LastFPSTime=0;
 
 //VIDEO
-extern SDL_Surface *sdlscrn; 
-unsigned short int bmp[1024*1024];
+extern SDL_Surface *sdlscrn; // returned to Hatari to make sure NULL pointer exceptions don't happen
+
+unsigned short int bmp[1024*1024]; // the framebuffer used by libretro video callback
+
 unsigned char savbkg[1024*1024* 2];
 
 //SOUND
@@ -174,10 +176,32 @@ void save_bkg(void)
    }
 }
 
-void retro_fillrect(SDL_Surface * surf,SDL_Rect *rect,unsigned int col)
+void retro_updaterects(SDL_Surface * surf,int num,SDL_Rect *rects)
+{
+// draw all rects with src surf into bmp (5,6,5 format)
+   unsigned char *ptr = (unsigned char*)surf->pixels;
+
+   for(int r=0; r<num; r++) {
+      for(int i=0; i<rects[r].w; i++)
+      {
+         for(int j=0; j<rects[r].h; j++)
+         {
+            bmp[i+j*VIRTUAL_WIDTH] = ptr[i+j*surf->pitch];
+         }
+      }
+   }
+
+//   DrawFBoxBmp(bmp,rect->x,rect->y,rect->w ,rect->h,col); 
+}
+
+void retro_updaterect(SDL_Surface * surf,int x,int y, int w, int h)
+{
+}
+
+/*void retro_fillrect(SDL_Surface * surf,SDL_Rect *rect,unsigned int col)
 {
    DrawFBoxBmp(bmp,rect->x,rect->y,rect->w ,rect->h,col); 
-}
+}*/
 
 int  GuiGetMouseState( int * x,int * y)
 {
@@ -249,7 +273,7 @@ SDL_Surface *prepare_texture(int w,int h,int b)
 
    //printf("fin prepare tex:%dx%dx%d\n",bitmp->w,bitmp->h,bitmp->format->BytesPerPixel);
    return bitmp;
-}      
+}
 
 void texture_init(void)
 {

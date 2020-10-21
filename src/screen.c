@@ -109,11 +109,12 @@ SDL_Window *sdlWindow;
 static SDL_Renderer *sdlRenderer;
 static SDL_Texture *sdlTexture;
 static bool bUseSdlRenderer;            /* true when using SDL2 renderer */
-
+/*
 void SDL_UpdateRects(SDL_Surface *screen, int numrects, SDL_Rect *rects)
 {
 	if (bUseSdlRenderer)
 	{
+// Troed: Is this the only actual blit needed?
 		SDL_UpdateTexture(sdlTexture, NULL, screen->pixels, screen->pitch);
 		SDL_RenderCopy(sdlRenderer, sdlTexture, NULL, NULL);
 		SDL_RenderPresent(sdlRenderer);
@@ -138,7 +139,7 @@ void SDL_UpdateRect(SDL_Surface *screen, Sint32 x, Sint32 y, Sint32 w, Sint32 h)
 	rect.w = w; rect.h = h;
 	SDL_UpdateRects(screen, 1, &rect);
 }
-
+*/
 #endif /* WITH_SDL2 */
 
 /*-----------------------------------------------------------------------*/
@@ -495,6 +496,8 @@ bool Screen_SetSDLVideoSize(int width, int height, int bitdepth, bool bForceChan
 	}
 	else
 	{
+// Troed: Re-use libretro's? If so all SDL stuff needs to be removed
+//        since we just want to render to framebuffer?
 		sdlWindow = SDL_CreateWindow("Hatari", SDL_WINDOWPOS_UNDEFINED,
 		                             SDL_WINDOWPOS_UNDEFINED,
 		                             win_width, win_height, sdlVideoFlags);

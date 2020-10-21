@@ -234,7 +234,7 @@ all: pre-build $(TARGET)
 
 pre-build:
 # Use Hatari's cmake build system to build all libraries and most other object files. It will fail to link the final Hatari executable, which is fine for our use
-	- cmake -DCMAKE_C_FLAGS="$(CFLAGS) -I/usr/include -I/usr/include/SDL2 -I../libretro -I../libretro/libretro-common/include -I../libretro/libretro-common/include/compat/zlib -I../libretro/include -I../libretro/utils" .;VERBOSE=1 make
+	- cmake -DCMAKE_C_FLAGS="$(CFLAGS) -I../libretro/include -I/usr/include -I/usr/include/SDL2 -I../libretro -I../libretro/libretro-common/include -I../libretro/libretro-common/include/compat/zlib -I../libretro/utils" .;VERBOSE=1 make
 
 $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING_LINK),1)

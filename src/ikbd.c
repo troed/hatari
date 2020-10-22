@@ -1414,6 +1414,11 @@ static void IKBD_SendRelMousePacket(void)
 	}
 }
 
+#ifdef __LIBRETRO__
+extern unsigned char MXjoy0;
+extern unsigned char MXjoy1;
+extern int NUMjoy;
+#endif
 
 /**
  * Get joystick data
@@ -1421,14 +1426,34 @@ static void IKBD_SendRelMousePacket(void)
 static void IKBD_GetJoystickData(void)
 {
 	/* Joystick 1 */
-	KeyboardProcessor.Joy.JoyData[1] = Joy_GetStickData(1);
+	KeyboardProcessor.Joy.JoyData[1] =
+#ifdef __LIBRETRO__
+                       MXjoy0;
+#else
+                       Joy_GetStickData(1);
+#endif
 
+#ifdef __LIBRETRO__
+if(NUMjoy<0){
+#endif
 	/* If mouse is on, joystick 0 is not connected */
 	if (KeyboardProcessor.MouseMode==AUTOMODE_OFF
 	        || (bBothMouseAndJoy && KeyboardProcessor.MouseMode==AUTOMODE_MOUSEREL))
-		KeyboardProcessor.Joy.JoyData[0] = Joy_GetStickData(0);
+               KeyboardProcessor.Joy.JoyData[0] = 
+#ifdef __LIBRETRO__
+                       MXjoy1;
+#else
+                       Joy_GetStickData(0);
+#endif
+
 	else
 		KeyboardProcessor.Joy.JoyData[0] = 0x00;
+
+#ifdef __LIBRETRO__
+       }
+#endif
+
+
 }
 
 
